@@ -35,79 +35,15 @@ impl Handler for DockerHandler {
     }
 }
 
-/// Semantic deduplication using BERT embeddings.
-/// Falls back to exact-match dedup if BERT unavailable.
-fn semantic_dedup(lines: &[&str]) -> Vec<String> {
-    // Try BERT dedup
-    let non_empty: Vec<(usize, &str)> = lines
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| !l.trim().is_empty())
-        .map(|(i, l)| (i, *l))
-        .collect();
-
-    if non_empty.is_empty() {
-        return lines.iter().map(|l| l.to_string()).collect();
-    }
-
-    let texts: Vec<&str> = non_empty.iter().map(|(_, l)| *l).collect();
-
-    match ccr_core::summarizer::embed_batch(&texts) {
-        Ok(embeddings) => {
-            let threshold = 0.90f32;
-            let mut kept_indices: Vec<usize> = Vec::new();
-            let mut kept_embeddings: Vec<Vec<f32>> = Vec::new();
-
-            for (pos, (orig_idx, line)) in non_empty.iter().enumerate() {
-                // Always keep hard-keep lines
-                if util::is_hard_keep(line) {
-                    kept_indices.push(*orig_idx);
-                    kept_embeddings.push(embeddings[pos].clone());
-                    continue;
-                }
-
-                // Check similarity against already-kept embeddings
-                let is_dup = kept_embeddings.iter().any(|kept_emb| {
-                    util::cosine_similarity(&embeddings[pos], kept_emb) > threshold
-                });
-
-                if !is_dup {
-                    kept_indices.push(*orig_idx);
-                    kept_embeddings.push(embeddings[pos].clone());
-                }
-            }
-
-            kept_indices.sort();
-            kept_indices.iter().map(|&i| lines[i].to_string()).collect()
-        }
-        Err(_) => {
-            // Fall back to exact-match dedup
-            let mut seen = std::collections::HashSet::new();
-            lines
-                .iter()
-                .filter(|&&l| seen.insert(l))
-                .map(|l| l.to_string())
-                .collect()
-        }
-    }
-}
-
-
 fn filter_logs(output: &str) -> String {
-    let lines: Vec<&str> = output.lines().collect();
-    let deduped = semantic_dedup(&lines);
-
-    let original_count = lines.len();
-    let deduped_count = deduped.len();
-
-    let mut result = deduped.join("\n");
-    if deduped_count < original_count {
-        result.push_str(&format!(
-            "\n[{} duplicate lines collapsed by semantic dedup]",
-            original_count - deduped_count
-        ));
+    let lines_in = output.lines().count();
+    if lines_in == 0 {
+        return output.to_string();
     }
-    result
+    // Anomaly-based scoring: outlier lines (errors, unique events) score highest.
+    // Budget: ~30% of lines, min 20, max 200.
+    let budget = (lines_in / 3).max(20).min(200);
+    ccr_core::summarizer::summarize(output, budget).output
 }
 
 fn filter_ps(output: &str) -> String {

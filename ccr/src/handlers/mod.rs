@@ -43,8 +43,18 @@ pub trait Handler: Send + Sync {
     fn filter(&self, output: &str, args: &[String]) -> String;
 }
 
-/// Returns a handler for the given command name, or `None` if the command is unknown.
+/// Returns a handler for the given command name.
+/// Falls through a three-level lookup:
+/// 1. Exact registry match
+/// 2. Static alias / pattern table (covers versioned binaries, wrappers, common aliases)
+/// 3. BERT similarity routing for truly unknown commands
 pub fn get_handler(cmd: &str) -> Option<Box<dyn Handler>> {
+    get_handler_exact(cmd)
+        .or_else(|| get_handler_alias(cmd))
+        .or_else(|| get_handler_bert(cmd))
+}
+
+fn get_handler_exact(cmd: &str) -> Option<Box<dyn Handler>> {
     match cmd {
         // Existing handlers
         "cargo" => Some(Box::new(cargo::CargoHandler)),
@@ -91,4 +101,108 @@ pub fn get_handler(cmd: &str) -> Option<Box<dyn Handler>> {
 /// Returns true if `cmd` is a known handler command.
 pub fn is_known(cmd: &str) -> bool {
     get_handler(cmd).is_some()
+}
+
+// ── Level 2: Static alias / pattern routing ───────────────────────────────────
+
+/// Maps command name patterns to canonical handler keys.
+/// Covers versioned binaries, wrapper scripts, and well-known aliases.
+const STATIC_ALIASES: &[(&str, &str)] = &[
+    // Python variants
+    ("python3.8",  "python"), ("python3.9",  "python"), ("python3.10", "python"),
+    ("python3.11", "python"), ("python3.12", "python"), ("python3.13", "python"),
+    ("py",         "python"),
+    // pip variants
+    ("pip3.9",  "pip"), ("pip3.10", "pip"), ("pip3.11", "pip"), ("pip3.12", "pip"),
+    ("poetry",  "pip"), ("pdm",     "pip"), ("conda",   "pip"),
+    // pytest variants
+    ("py.test",  "pytest"), ("pytest3", "pytest"),
+    // JS runtimes that run jest-style tests
+    ("bun",  "jest"),
+    ("deno", "jest"),
+    // Build / task runners
+    ("nx",          "jest"),   // nx test runs jest under the hood
+    ("./gradlew",   "gradle"), ("gradlew",   "gradle"),
+    ("./mvnw",      "mvn"),    ("mvnw",      "mvn"),
+    ("ninja",       "make"),   ("bmake",     "make"),
+    // Kubernetes wrappers
+    ("k",           "kubectl"), ("kubectl.exe", "kubectl"),
+    ("minikube",    "kubectl"), ("kind",        "kubectl"),
+    // Helm variants
+    ("helm3",       "helm"),
+    // Terraform variants
+    ("terraform1",  "terraform"),
+    // Cloud CLIs
+    ("gcloud",      "aws"), // similar output pattern
+    ("az",          "aws"),
+];
+
+fn get_handler_alias(cmd: &str) -> Option<Box<dyn Handler>> {
+    // Exact alias lookup
+    for &(alias, target) in STATIC_ALIASES {
+        if alias == cmd {
+            return get_handler_exact(target);
+        }
+    }
+    // Pattern: any `python3.X` not in the static list
+    if cmd.starts_with("python3.") || cmd.starts_with("python2.") {
+        return get_handler_exact("python");
+    }
+    // Pattern: any `pip3.X`
+    if cmd.starts_with("pip3.") || cmd.starts_with("pip2.") {
+        return get_handler_exact("pip");
+    }
+    None
+}
+
+// ── Level 3: BERT similarity routing ─────────────────────────────────────────
+
+/// Handler representatives: (canonical_name, display_label) for embedding.
+/// We embed the canonical name and compare against the unknown command.
+const HANDLER_REPS: &[(&str, &str)] = &[
+    ("cargo build test check clippy",   "cargo"),
+    ("git commit push pull diff log",   "git"),
+    ("docker run logs ps images build", "docker"),
+    ("npm install test run script",     "npm"),
+    ("kubectl get logs describe apply", "kubectl"),
+    ("terraform plan apply init",       "terraform"),
+    ("pytest test assertion failure",   "pytest"),
+    ("jest test describe it expect",    "jest"),
+    ("go build test run mod",           "go"),
+    ("mvn build test install compile",  "mvn"),
+    ("helm install upgrade list diff",  "helm"),
+    ("brew install update upgrade",     "brew"),
+    ("aws ec2 s3 lambda iam",           "aws"),
+    ("make build clean install target", "make"),
+    ("psql query select insert",        "psql"),
+];
+
+const BERT_ROUTE_THRESHOLD: f32 = 0.55;
+
+fn get_handler_bert(cmd: &str) -> Option<Box<dyn Handler>> {
+    // Only route commands that look like real CLI tools (not paths, not flags)
+    if cmd.contains('/') || cmd.starts_with('-') || cmd.is_empty() {
+        return None;
+    }
+
+    let reps: Vec<&str> = HANDLER_REPS.iter().map(|(rep, _)| *rep).collect();
+    let mut all_texts = reps.clone();
+    all_texts.push(cmd);
+
+    let embeddings = ccr_core::summarizer::embed_batch(&all_texts).ok()?;
+    let cmd_emb = embeddings.last()?;
+    let rep_embs = &embeddings[..embeddings.len() - 1];
+
+    let (best_idx, best_sim) = rep_embs
+        .iter()
+        .enumerate()
+        .map(|(i, emb)| (i, util::cosine_similarity(emb, cmd_emb)))
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
+
+    if best_sim >= BERT_ROUTE_THRESHOLD {
+        let target = HANDLER_REPS[best_idx].1;
+        return get_handler_exact(target);
+    }
+
+    None
 }

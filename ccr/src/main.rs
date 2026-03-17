@@ -4,6 +4,7 @@ mod cmd;
 mod config_loader;
 mod handlers;
 mod hook;
+mod session;
 
 #[derive(Parser)]
 #[command(name = "ccr", about = "Cool Cost Reduction — LLM token optimizer")]
@@ -97,7 +98,7 @@ fn init() -> anyhow::Result<()> {
 INPUT=$(cat)
 CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
 [ -z "$CMD" ] && exit 0
-REWRITTEN=$("{ccr_bin_str}" rewrite "$CMD" 2>/dev/null) || exit 0
+REWRITTEN=$(CCR_SESSION_ID=$PPID "{ccr_bin_str}" rewrite "$CMD" 2>/dev/null) || exit 0
 [ "$CMD" = "$REWRITTEN" ] && exit 0
 ORIGINAL_INPUT=$(echo "$INPUT" | jq -c '.tool_input')
 UPDATED_INPUT=$(echo "$ORIGINAL_INPUT" | jq --arg cmd "$REWRITTEN" '.command = $cmd')
@@ -123,7 +124,9 @@ jq -n --argjson updated "$UPDATED_INPUT" \
         serde_json::json!({})
     };
 
-    let ccr_hook_cmd = format!("{} hook", ccr_bin_str);
+    // CCR_SESSION_ID=$PPID passes Claude Code's PID so all hook invocations
+    // within one session share the same state file.
+    let ccr_hook_cmd = format!("CCR_SESSION_ID=$PPID {} hook", ccr_bin_str);
     let ccr_rewrite_cmd = rewrite_script_path.to_string_lossy().to_string();
 
     // Merge CCR entries into existing hook arrays rather than overwriting them.

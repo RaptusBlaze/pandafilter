@@ -357,6 +357,7 @@ dependencies = [
  "assert_cmd",
  "atty",
  "ccr-core",
+ "ccr-sdk",
  "clap",
  "dirs 5.0.1",
  "predicates",

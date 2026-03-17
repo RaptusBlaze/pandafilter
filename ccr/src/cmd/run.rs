@@ -57,10 +57,36 @@ pub fn run(args: Vec<String>) -> Result<()> {
             Err(_) => ccr_core::config::CcrConfig::default(),
         };
         let pipeline = ccr_core::pipeline::Pipeline::new(config);
-        match pipeline.process(&raw_output, Some(&cmd_name)) {
+        match pipeline.process(&raw_output, Some(&cmd_name), Some(&cmd_name)) {
             Ok(r) => r.output,
             Err(_) => raw_output.clone(),
         }
+    };
+
+    // B3: Session cache — check for semantically identical prior output, record new one.
+    let sid = crate::session::session_id();
+    let mut session = crate::session::SessionState::load(&sid);
+    let filtered = if let Ok(mut embeddings) =
+        ccr_core::summarizer::embed_batch(&[filtered.as_str()])
+    {
+        if let Some(emb) = embeddings.pop() {
+            if let Some(hit) = session.find_similar(&cmd_name, &emb) {
+                let age = crate::session::format_age(hit.age_secs);
+                format!(
+                    "[same output as turn {} ({} ago) — {} tokens saved]",
+                    hit.turn, age, hit.tokens_saved
+                )
+            } else {
+                let tokens = ccr_core::tokens::count_tokens(&filtered);
+                session.record(&cmd_name, emb, tokens, &filtered);
+                session.save(&sid);
+                filtered
+            }
+        } else {
+            filtered
+        }
+    } else {
+        filtered
     };
 
     // Compute analytics
