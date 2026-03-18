@@ -2,6 +2,9 @@
 resolver = "2"
 members = ["ccr-core", "ccr", "ccr-sdk", "ccr-eval"]
 
+[workspace.package]
+license = "MIT"
+
 [workspace.dependencies]
 regex       = "1"
 serde       = { version = "1", features = ["derive"] }
