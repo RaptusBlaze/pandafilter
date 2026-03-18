@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-REPO="AssafWoo/Cool-Consumption-Recduction-CCR-"
+REPO="AssafWoo/Cool-Consumption-Recduction"
 INSTALL_DIR="${CCR_INSTALL_DIR:-$HOME/.local/bin}"
 
 # Detect platform
