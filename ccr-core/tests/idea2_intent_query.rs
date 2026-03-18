@@ -18,9 +18,6 @@ fn has_line(output: &str, needle: &str) -> bool {
     output.lines().any(|l| l.contains(needle))
 }
 
-fn count_lines_with(output: &str, needle: &str) -> usize {
-    output.lines().filter(|l| l.contains(needle)).count()
-}
 
 // ── Intent bias changes selection ─────────────────────────────────────────────
 

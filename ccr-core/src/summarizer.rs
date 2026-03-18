@@ -439,7 +439,6 @@ fn summarize_semantic_anchored(
     let model = get_model()?;
     let texts: Vec<&str> = indexed_lines.iter().map(|(_, l)| *l).collect();
     let embeddings = model.embed(texts, None)?;
-    let n = indexed_lines.len();
 
     let centroid = compute_centroid(&embeddings);
 

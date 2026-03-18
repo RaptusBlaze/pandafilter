@@ -158,7 +158,7 @@ impl SessionState {
 
         let updated = match self.command_centroids.get(cmd) {
             None => new_centroid,
-            Some(old) if prior_count <= 0.0 => new_centroid,
+            Some(_) if prior_count <= 0.0 => new_centroid,
             Some(old) => {
                 let n = prior_count;
                 let np1 = n + 1.0;
@@ -185,10 +185,13 @@ pub struct DeltaResult {
     /// Compressed output showing only new/changed lines plus a back-reference.
     pub output: String,
     /// Number of new output lines not semantically matched to the prior run.
+    #[allow(dead_code)]
     pub new_count: usize,
     /// Number of new output lines matched (suppressed) by the prior run.
+    #[allow(dead_code)]
     pub same_count: usize,
     /// Turn number of the prior run this delta references.
+    #[allow(dead_code)]
     pub reference_turn: usize,
 }
 

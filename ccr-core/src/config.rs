@@ -75,6 +75,7 @@ pub struct FilterPattern {
 #[serde(untagged)]
 pub enum FilterAction {
     Simple(SimpleAction),
+    #[allow(non_snake_case)]
     ReplaceWith { ReplaceWith: String },
 }
 

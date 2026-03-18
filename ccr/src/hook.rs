@@ -5,6 +5,7 @@ use std::io::{self, Read};
 #[derive(Debug, Deserialize)]
 struct HookInput {
     #[serde(default)]
+    #[allow(dead_code)]
     tool_name: String,
     #[serde(default)]
     tool_input: serde_json::Value,
@@ -81,24 +82,49 @@ pub fn run() -> Result<()> {
     let mut session = crate::session::SessionState::load(&sid);
     let cmd_key = command_hint.as_deref().unwrap_or("unknown");
 
+    // Idea 3: Delta compression — embed pipeline output and suppress lines
+    // already seen in a prior run of the same command.
+    let pipeline_emb = ccr_core::summarizer::embed_batch(&[result.output.as_str()])
+        .ok()
+        .and_then(|mut v| v.pop());
+
+    let output_after_delta = if let Some(ref emb) = pipeline_emb {
+        let lines: Vec<&str> = result.output.lines().collect();
+        session
+            .compute_delta(cmd_key, &lines, emb)
+            .map(|d| d.output)
+            .unwrap_or_else(|| result.output.clone())
+    } else {
+        result.output.clone()
+    };
+
     // C1: Sentence-level deduplication against recent session content.
     // Marks sentences that repeat earlier tool outputs as [covered in turn N].
-    let after_dedup = apply_sentence_dedup(&result.output, cmd_key, &session);
+    let after_dedup = apply_sentence_dedup(&output_after_delta, cmd_key, &session);
 
     // C2: Apply extra line compression when the session is token-heavy.
+    // Idea 7: Use historical command centroid when available for smarter second-pass.
     let compression_factor = session.compression_factor();
+    let centroid_for_c2 = session.command_centroid(cmd_key).cloned();
     let final_output = if compression_factor < 0.90 {
         let line_count = after_dedup.lines().count();
         let reduced_budget = ((line_count as f32 * compression_factor) as usize).max(10);
-        ccr_core::summarizer::summarize(&after_dedup, reduced_budget).output
+        if let Some(ref centroid) = centroid_for_c2 {
+            ccr_core::summarizer::summarize_against_centroid(&after_dedup, reduced_budget, centroid)
+                .output
+        } else {
+            ccr_core::summarizer::summarize(&after_dedup, reduced_budget).output
+        }
     } else {
         after_dedup
     };
 
     // B3: Record in session cache for cross-turn dedup on future calls.
+    // Idea 7: Also update per-command historical centroid.
     if let Ok(mut embeddings) = ccr_core::summarizer::embed_batch(&[final_output.as_str()]) {
         if let Some(emb) = embeddings.pop() {
             let tokens = ccr_core::tokens::count_tokens(&final_output);
+            session.update_command_centroid(cmd_key, emb.clone());
             session.record(cmd_key, emb, tokens, &final_output);
             session.save(&sid);
         }

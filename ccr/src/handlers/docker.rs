@@ -1,4 +1,3 @@
-use super::util;
 use super::Handler;
 
 pub struct DockerHandler;

@@ -23,7 +23,7 @@
 ///   }
 ///
 /// Run with: cargo test -p ccr --test idea3_delta
-use ccr::session::{DeltaResult, SessionState};
+use ccr::session::SessionState;
 use ccr_core::summarizer::embed_batch;
 
 // ── helper ────────────────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-use crate::runner::{ConvCompareResult, ConvFixtureResult, FixtureResult, QuestionResult};
+use crate::runner::{ConvCompareResult, FixtureResult};
 
 pub fn print_fixture_result(r: &FixtureResult) {
     println!("  Lines:   {} → {} ({:.0}% reduction)",
@@ -169,80 +169,6 @@ pub fn print_conv_compare_summary(results: &[ConvCompareResult]) {
     } else {
         println!();
         println!("⚠ {} V2 regressions — review V2_REGR lines above.", v2_regressions);
-    }
-}
-
-pub fn print_conv_fixture_result(r: &ConvFixtureResult) {
-    println!("  [{}]", r.description);
-    println!("  Turns:   {}", r.turns);
-    println!("  Tokens:  {} → {} ({:.1}% saved)", r.tokens_in, r.tokens_out, r.savings_pct);
-    println!("  Recall:  {:.0}% (compressed) vs {:.0}% (original baseline)",
-        r.recall, r.original_recall);
-    println!();
-
-    for qr in &r.question_results {
-        let orig_icon = if qr.original_score { "✓" } else { "✗" };
-        let comp_icon = if qr.compressed_score { "✓" } else { "✗" };
-        let status = match (qr.original_score, qr.compressed_score) {
-            (true, true)   => "OK        ",
-            (true, false)  => "REGRESSION",
-            (false, true)  => "IMPROVED  ",
-            (false, false) => "BOTH_MISS ",
-        };
-        println!("  [{}] Q: {}", status, qr.question);
-        println!("      orig[{}]: {}", orig_icon, truncate(&qr.original_answer, 80));
-        println!("      comp[{}]: {}", comp_icon, truncate(&qr.compressed_answer, 80));
-        println!("      need one of: {:?}", qr.key_facts);
-        println!();
-    }
-}
-
-pub fn print_conv_summary(results: &[ConvFixtureResult]) {
-    if results.is_empty() {
-        return;
-    }
-
-    println!("=== CONVERSATION COMPRESSION SUMMARY ===");
-    println!();
-    println!("{:<30} {:>8} {:>8} {:>10} {:>10}",
-        "Fixture", "Savings", "Turns", "Recall%", "Baseline%");
-    println!("{}", "-".repeat(70));
-
-    for r in results {
-        println!("{:<30} {:>7.1}% {:>8} {:>9.0}% {:>9.0}%",
-            r.name, r.savings_pct, r.turns, r.recall, r.original_recall);
-    }
-
-    println!("{}", "-".repeat(70));
-
-    let avg_savings  = results.iter().map(|r| r.savings_pct).sum::<f32>() / results.len() as f32;
-    let avg_recall   = results.iter().map(|r| r.recall).sum::<f32>()      / results.len() as f32;
-    let avg_baseline = results.iter().map(|r| r.original_recall).sum::<f32>() / results.len() as f32;
-
-    println!("{:<30} {:>7.1}% {:>8} {:>9.0}% {:>9.0}%",
-        "AVERAGE", avg_savings, "", avg_recall, avg_baseline);
-    println!();
-
-    let total_questions: usize = results.iter().map(|r| r.question_results.len()).sum();
-    let regressions: usize = results.iter()
-        .flat_map(|r| &r.question_results)
-        .filter(|q| q.original_score && !q.compressed_score)
-        .count();
-    let improvements: usize = results.iter()
-        .flat_map(|r| &r.question_results)
-        .filter(|q| !q.original_score && q.compressed_score)
-        .count();
-
-    println!("Total questions:  {}", total_questions);
-    println!("Regressions:      {} (worked in original, broke in compressed)", regressions);
-    println!("Improvements:     {} (failed in original, works in compressed)", improvements);
-
-    if regressions == 0 {
-        println!();
-        println!("✓ Zero regressions — conversation compression preserved all key facts.");
-    } else {
-        println!();
-        println!("⚠ {} regressions — review REGRESSION lines above.", regressions);
     }
 }
 

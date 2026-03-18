@@ -1,4 +1,4 @@
-use crate::config::{CommandConfig, FilterAction, FilterPattern, SimpleAction};
+use crate::config::{CommandConfig, FilterAction, SimpleAction};
 use regex::Regex;
 
 struct CompiledPattern {

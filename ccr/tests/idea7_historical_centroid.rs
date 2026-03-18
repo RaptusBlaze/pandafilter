@@ -26,13 +26,6 @@ use ccr_core::summarizer::{embed_batch, summarize_against_centroid};
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-fn embed_text(text: &str) -> Vec<f32> {
-    embed_batch(&[text])
-        .expect("embed_batch failed")
-        .into_iter()
-        .next()
-        .unwrap()
-}
 
 fn centroid_of(texts: &[&str]) -> Vec<f32> {
     let embs = embed_batch(texts).expect("embed_batch failed");

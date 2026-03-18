@@ -143,24 +143,12 @@ pub struct ConvTurn {
     pub content: String,
 }
 
-#[derive(Debug)]
-pub struct ConvFixtureResult {
-    pub name: String,
-    pub description: String,
-    pub turns: usize,
-    pub tokens_in: usize,
-    pub tokens_out: usize,
-    pub savings_pct: f32,
-    pub question_results: Vec<QuestionResult>,
-    pub recall: f32,
-    pub original_recall: f32,
-}
-
 /// Per-question result when comparing v1 vs v2.
 #[derive(Debug)]
 pub struct ConvCompareQuestion {
     pub question: String,
     pub key_facts: Vec<String>,
+    #[allow(dead_code)]
     pub original_score: bool,
     pub v1_score: bool,
     pub v2_score: bool,
@@ -180,6 +168,7 @@ pub struct ConvCompareResult {
     pub v1_tokens_out: usize,
     pub v1_savings_pct: f32,
     pub v1_recall: f32,
+    #[allow(dead_code)]
     pub v2_tokens_in: usize,
     pub v2_tokens_out: usize,
     pub v2_savings_pct: f32,
@@ -376,78 +365,6 @@ pub fn run_conv_fixture_compare(path: &Path, api_key: &str) -> Result<ConvCompar
         cumulative_savings_v1_pct:  cum_savings(cum_v1),
         cumulative_savings_v2_pct:  cum_savings(cum_v2),
         questions,
-    })
-}
-
-// Keep the old single-version runner for backwards compatibility in main.
-pub fn run_conv_fixture(path: &Path, api_key: &str) -> Result<ConvFixtureResult> {
-    let name = path
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .replace(".conv.toml", "");
-    let raw = std::fs::read_to_string(path)?;
-    let fixture: ConvFixture = toml::from_str(&raw)
-        .with_context(|| format!("Failed to parse {}", path.display()))?;
-
-    let messages: Vec<Message> = fixture
-        .turns
-        .iter()
-        .map(|t| Message { role: t.role.clone(), content: t.content.clone() })
-        .collect();
-
-    let optimizer = Optimizer::default();
-    let result = optimizer.compress(messages.clone());
-
-    let tokens_in = result.tokens_in;
-    let tokens_out = result.tokens_out;
-    let savings_pct = if tokens_in == 0 {
-        0.0
-    } else {
-        (tokens_in - tokens_out) as f32 / tokens_in as f32 * 100.0
-    };
-
-    let original_text = format_conversation(&messages);
-    let compressed_text = format_conversation(&result.messages);
-
-    let mut question_results = Vec::new();
-    let mut original_hits = 0usize;
-    let mut compressed_hits = 0usize;
-
-    for q in &fixture.questions {
-        let orig_answer = ask_claude(&original_text, &q.question, api_key)?;
-        let comp_answer = ask_claude(&compressed_text, &q.question, api_key)?;
-
-        let orig_score = score_answer(&orig_answer, &q.key_facts);
-        let comp_score = score_answer(&comp_answer, &q.key_facts);
-
-        if orig_score { original_hits += 1; }
-        if comp_score { compressed_hits += 1; }
-
-        question_results.push(QuestionResult {
-            question: q.question.clone(),
-            original_answer: orig_answer,
-            compressed_answer: comp_answer,
-            original_score: orig_score,
-            compressed_score: comp_score,
-            key_facts: q.key_facts.clone(),
-        });
-    }
-
-    let n = fixture.questions.len() as f32;
-    let recall = if n == 0.0 { 100.0 } else { compressed_hits as f32 / n * 100.0 };
-    let original_recall = if n == 0.0 { 100.0 } else { original_hits as f32 / n * 100.0 };
-
-    Ok(ConvFixtureResult {
-        name,
-        description: fixture.description,
-        turns: fixture.turns.len(),
-        tokens_in,
-        tokens_out,
-        savings_pct,
-        question_results,
-        recall,
-        original_recall,
     })
 }
 
