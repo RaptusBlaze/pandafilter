@@ -36,6 +36,8 @@ pub fn rewrite_command(command: &str) -> Option<String> {
 }
 
 /// Rewrite a single (non-compound) command.
+/// Uses the handler's `rewrite_args` to inject flags (e.g. --message-format json)
+/// so the rewritten command string reflects the actual args that will be run.
 fn rewrite_single(command: &str) -> Option<String> {
     let trimmed = command.trim();
 
@@ -47,11 +49,13 @@ fn rewrite_single(command: &str) -> Option<String> {
     // Extract argv[0]
     let first = trimmed.split_whitespace().next()?;
 
-    if crate::handlers::is_known(first) {
-        Some(format!("ccr run {}", trimmed))
-    } else {
-        None
-    }
+    let handler = crate::handlers::get_handler(first)?;
+
+    // Build the flag-injected arg list via the handler
+    let args: Vec<String> = trimmed.split_whitespace().map(String::from).collect();
+    let rewritten_args = handler.rewrite_args(&args);
+
+    Some(format!("ccr run {}", rewritten_args.join(" ")))
 }
 
 /// Try to split a compound command on `operator` and rewrite each part.
@@ -93,7 +97,27 @@ mod tests {
     #[test]
     fn known_command_rewritten() {
         let result = rewrite_command("git status");
+        // git status has no flag injection; wrapped as-is
         assert_eq!(result, Some("ccr run git status".to_string()));
+    }
+
+    #[test]
+    fn flag_injection_for_cargo_build() {
+        let result = rewrite_command("cargo build");
+        // cargo build gets --message-format json injected
+        let r = result.expect("cargo build should be rewritten");
+        assert!(r.starts_with("ccr run cargo build"), "should be wrapped: {}", r);
+        assert!(r.contains("--message-format"), "should inject --message-format: {}", r);
+        assert!(r.contains("json"), "should inject json format: {}", r);
+    }
+
+    #[test]
+    fn no_double_flag_injection() {
+        // If --message-format already present, it should not be added again
+        let result = rewrite_command("cargo build --message-format human");
+        let r = result.expect("should be rewritten");
+        let count = r.matches("--message-format").count();
+        assert_eq!(count, 1, "flag should appear exactly once: {}", r);
     }
 
     #[test]
@@ -111,10 +135,10 @@ mod tests {
     #[test]
     fn compound_and() {
         let result = rewrite_command("cargo build && git push");
-        assert_eq!(
-            result,
-            Some("ccr run cargo build && ccr run git push".to_string())
-        );
+        let r = result.expect("should be rewritten");
+        assert!(r.contains("ccr run cargo build"), "cargo part: {}", r);
+        assert!(r.contains("ccr run git push"), "git part: {}", r);
+        assert!(r.contains(" && "), "should preserve && operator: {}", r);
     }
 
     #[test]

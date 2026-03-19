@@ -9,7 +9,7 @@ pub fn run(command_hint: Option<String>) -> Result<()> {
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
 
-    let result = pipeline.process(&input, command_hint.as_deref(), None)?;
+    let result = pipeline.process(&input, command_hint.as_deref(), None, None)?;
 
     io::stdout().write_all(result.output.as_bytes())?;
 

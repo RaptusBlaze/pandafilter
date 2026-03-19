@@ -1,0 +1,9 @@
+make[1]: Entering directory '/home/user/project/src'
+cc -Wall -O2 -c main.c -o main.o
+cc -Wall -O2 -c util.c -o util.o
+make[2]: Entering directory '/home/user/project/src/lib'
+ar rcs libutil.a util.o
+make[2]: Leaving directory '/home/user/project/src/lib'
+cc -o myapp main.o -L./lib -lutil
+make[1]: Leaving directory '/home/user/project/src'
+make[1]: Nothing to be done for 'tests'.

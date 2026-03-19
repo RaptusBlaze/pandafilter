@@ -1,0 +1,8 @@
+W0319 14:23:01.123456   12345 warnings.go:70] unknown field "spec.template.spec.containers[0].resources.limits.ephemeral-storage"
+I0319 14:23:01.234567   12345 round_trippers.go:553] GET https://api.cluster.example.com/api/v1/namespaces/default/pods
+Warning: apps/v1 Deployment is deprecated in v1.16+, unavailable in v1.22+
+NAME                          READY   STATUS    RESTARTS   AGE
+web-deployment-abc123-xyz     2/2     Running   0          3d
+api-service-def456-uvw        1/1     Running   0          1d
+worker-job-ghi789-rst         0/1     CrashLoopBackOff   5   2h
+resource mapping not found for "PodDisruptionBudget": ensure CRDs are installed

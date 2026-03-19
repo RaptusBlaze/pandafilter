@@ -57,10 +57,32 @@ pub fn run(args: Vec<String>) -> Result<()> {
             Err(_) => ccr_core::config::CcrConfig::default(),
         };
         let pipeline = ccr_core::pipeline::Pipeline::new(config);
-        match pipeline.process(&raw_output, Some(&cmd_name), Some(&cmd_name)) {
+        match pipeline.process(&raw_output, Some(&cmd_name), Some(&cmd_name), None) {
             Ok(r) => r.output,
             Err(_) => raw_output.clone(),
         }
+    };
+
+    // Idea 3: Delta compression — suppress lines seen in a prior run of the same command.
+    // Skip for short outputs (< 20 lines) where delta overhead exceeds savings.
+    let filtered = if filtered.lines().count() >= 20 {
+        if let Ok(mut embs) = ccr_core::summarizer::embed_batch(&[filtered.as_str()]) {
+            if let Some(emb) = embs.pop() {
+                let sid_pre = crate::session::session_id();
+                let session_pre = crate::session::SessionState::load(&sid_pre);
+                let lines: Vec<&str> = filtered.lines().collect();
+                match session_pre.compute_delta(&cmd_name, &lines, &emb) {
+                    Some(delta) => delta.output,
+                    None => filtered,
+                }
+            } else {
+                filtered
+            }
+        } else {
+            filtered
+        }
+    } else {
+        filtered
     };
 
     // B3: Session cache — check for semantically identical prior output, record new one.

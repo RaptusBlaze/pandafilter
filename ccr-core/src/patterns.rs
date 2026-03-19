@@ -22,6 +22,19 @@ impl PatternFilter {
         Ok(Self { patterns })
     }
 
+    /// Returns true if `line` matches any Remove-action pattern for the current command.
+    /// Used for streaming pre-filtering before BERT processing.
+    pub fn should_remove(&self, line: &str) -> bool {
+        for pat in &self.patterns {
+            if pat.regex.is_match(line) {
+                if let FilterAction::Simple(SimpleAction::Remove) = &pat.action {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     pub fn apply(&self, input: &str) -> String {
         let lines: Vec<&str> = input.lines().collect();
         let mut result: Vec<String> = Vec::new();

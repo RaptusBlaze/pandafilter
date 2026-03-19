@@ -44,6 +44,21 @@ pub struct GlobalConfig {
     pub strip_ansi: bool,
     pub normalize_whitespace: bool,
     pub deduplicate_lines: bool,
+    /// Additional regex patterns for lines that must never be dropped.
+    /// Each entry is ORed with the built-in critical pattern
+    /// (error|warning|failed|fatal|panic|exception|critical).
+    /// Example: ["OOMKilled", "timeout", "deadline exceeded"]
+    #[serde(default)]
+    pub hard_keep_patterns: Vec<String>,
+    /// BERT embedding model to use for semantic summarization.
+    /// Options: "AllMiniLML6V2" (default, ~90MB), "AllMiniLML12V2" (~120MB).
+    /// First call wins — changing this requires restarting the process.
+    #[serde(default = "default_bert_model")]
+    pub bert_model: String,
+}
+
+fn default_bert_model() -> String {
+    "AllMiniLML6V2".to_string()
 }
 
 impl Default for GlobalConfig {
@@ -55,6 +70,8 @@ impl Default for GlobalConfig {
             strip_ansi: true,
             normalize_whitespace: true,
             deduplicate_lines: true,
+            hard_keep_patterns: Vec::new(),
+            bert_model: default_bert_model(),
         }
     }
 }

@@ -4,6 +4,22 @@ use super::Handler;
 pub struct HelmHandler;
 
 impl Handler for HelmHandler {
+    fn rewrite_args(&self, args: &[String]) -> Vec<String> {
+        let subcmd = args.get(1).map(|s| s.as_str()).unwrap_or("");
+        match subcmd {
+            "install" | "upgrade" | "rollback" => {
+                if args.iter().any(|a| a == "--no-color") {
+                    args.to_vec()
+                } else {
+                    let mut out = args.to_vec();
+                    out.push("--no-color".to_string());
+                    out
+                }
+            }
+            _ => args.to_vec(),
+        }
+    }
+
     fn filter(&self, output: &str, args: &[String]) -> String {
         let subcmd = args.get(1).map(|s| s.as_str()).unwrap_or("");
         match subcmd {

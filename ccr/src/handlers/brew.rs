@@ -3,6 +3,22 @@ use super::Handler;
 pub struct BrewHandler;
 
 impl Handler for BrewHandler {
+    fn rewrite_args(&self, args: &[String]) -> Vec<String> {
+        let subcmd = args.get(1).map(|s| s.as_str()).unwrap_or("");
+        match subcmd {
+            "install" | "reinstall" | "upgrade" => {
+                if args.iter().any(|a| a == "--quiet" || a == "-q") {
+                    args.to_vec()
+                } else {
+                    let mut out = args.to_vec();
+                    out.push("--quiet".to_string());
+                    out
+                }
+            }
+            _ => args.to_vec(),
+        }
+    }
+
     fn filter(&self, output: &str, args: &[String]) -> String {
         let subcmd = args.get(1).map(|s| s.as_str()).unwrap_or("");
         match subcmd {

@@ -66,21 +66,25 @@ pub fn run() -> Result<()> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    // Load session BEFORE pipeline call so we can pass the historical centroid
+    // to the summarizer, enabling anomaly scoring against what this command usually produces.
+    let sid = crate::session::session_id();
+    let mut session = crate::session::SessionState::load(&sid);
+    let cmd_key = command_hint.as_deref().unwrap_or("unknown");
+    let historical_centroid = session.command_centroid(cmd_key).cloned();
+
     let pipeline = ccr_core::pipeline::Pipeline::new(config);
     let result = match pipeline.process(
         &output_text,
         command_hint.as_deref(),
         query.as_deref(),
+        historical_centroid.as_deref(),
     ) {
         Ok(r) => r,
         Err(_) => return Ok(()),
     };
 
     // ── Session-aware passes ──────────────────────────────────────────────────
-
-    let sid = crate::session::session_id();
-    let mut session = crate::session::SessionState::load(&sid);
-    let cmd_key = command_hint.as_deref().unwrap_or("unknown");
 
     // Idea 3: Delta compression — embed pipeline output and suppress lines
     // already seen in a prior run of the same command.
@@ -120,11 +124,17 @@ pub fn run() -> Result<()> {
     };
 
     // B3: Record in session cache for cross-turn dedup on future calls.
-    // Idea 7: Also update per-command historical centroid.
+    // Idea 7: Also update per-command historical centroid using line-mean embedding
+    //         (better quality than embedding the whole output as a single string).
     if let Ok(mut embeddings) = ccr_core::summarizer::embed_batch(&[final_output.as_str()]) {
         if let Some(emb) = embeddings.pop() {
             let tokens = ccr_core::tokens::count_tokens(&final_output);
-            session.update_command_centroid(cmd_key, emb.clone());
+            // Update centroid with line-mean for better per-command history
+            if let Ok(line_centroid) = ccr_core::summarizer::compute_output_centroid(&final_output) {
+                session.update_command_centroid(cmd_key, line_centroid);
+            } else {
+                session.update_command_centroid(cmd_key, emb.clone());
+            }
             session.record(cmd_key, emb, tokens, &final_output);
             session.save(&sid);
         }

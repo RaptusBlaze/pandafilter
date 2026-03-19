@@ -1,5 +1,6 @@
 use once_cell::sync::OnceCell;
 use regex::Regex;
+use std::cell::RefCell;
 
 static CRITICAL_PATTERN: OnceCell<Regex> = OnceCell::new();
 
@@ -9,12 +10,65 @@ fn critical_pattern() -> &'static Regex {
     })
 }
 
+// ── P4: Configurable hard-keep patterns ───────────────────────────────────────
+
+thread_local! {
+    static EXTRA_KEEP_PATTERNS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Set additional regex patterns (beyond the built-in critical set) for lines
+/// that must never be dropped during summarization.
+/// Called once at startup from `main()` after loading config.
+/// Thread-local — safe for the single-threaded hook path.
+pub fn set_extra_keep_patterns(patterns: Vec<String>) {
+    EXTRA_KEEP_PATTERNS.with(|p| {
+        *p.borrow_mut() = patterns;
+    });
+}
+
+/// Build the effective critical-line regex for the current call.
+/// If no extra patterns are configured, returns a clone of the cached static.
+/// Otherwise, ORs the extras into the pattern — called once per summarize invocation.
+fn effective_critical_pattern() -> Regex {
+    EXTRA_KEEP_PATTERNS.with(|p| {
+        let extras = p.borrow();
+        if extras.is_empty() {
+            return critical_pattern().clone();
+        }
+        let valid_extras: Vec<String> = extras
+            .iter()
+            .filter(|e| !e.trim().is_empty())
+            .map(|e| format!("(?:{})", e))
+            .collect();
+        if valid_extras.is_empty() {
+            return critical_pattern().clone();
+        }
+        let pattern = format!("{}|{}", critical_pattern().as_str(), valid_extras.join("|"));
+        Regex::new(&pattern).unwrap_or_else(|_| critical_pattern().clone())
+    })
+}
+
+// ── P8: Configurable BERT model ───────────────────────────────────────────────
+
+static MODEL_NAME: OnceCell<String> = OnceCell::new();
+
+/// Set the BERT model name to use. Must be called before the first summarization.
+/// First call wins (subsequent calls are no-ops).
+/// Valid values: "AllMiniLML6V2" (default), "AllMiniLML12V2".
+pub fn set_model_name(name: &str) {
+    let _ = MODEL_NAME.set(name.to_string());
+}
+
+fn get_model_name() -> &'static str {
+    MODEL_NAME.get().map(|s| s.as_str()).unwrap_or("AllMiniLML6V2")
+}
+
 // ── Cached model ──────────────────────────────────────────────────────────────
 
 static MODEL_CACHE: OnceCell<fastembed::TextEmbedding> = OnceCell::new();
 
 /// Sentinel file written after a successful model load/download.
-/// Its presence means the ~90 MB model files are already on disk.
+/// Its presence means the model files are already on disk.
 fn bert_sentinel() -> Option<std::path::PathBuf> {
     std::env::var("HOME").ok().map(|h| {
         std::path::PathBuf::from(h)
@@ -38,22 +92,29 @@ fn mark_bert_cached() {
     }
 }
 
+fn load_model(name: &str) -> anyhow::Result<fastembed::TextEmbedding> {
+    use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+
+    if !bert_is_cached() {
+        eprintln!("[ccr] downloading BERT model ({}, one-time setup)...", name);
+        eprintln!("[ccr] this may take a minute. future runs are instant.");
+    }
+
+    let embedding_model = match name {
+        "AllMiniLML12V2" => EmbeddingModel::AllMiniLML12V2,
+        _ => EmbeddingModel::AllMiniLML6V2,
+    };
+
+    let model = TextEmbedding::try_new(
+        InitOptions::new(embedding_model).with_show_download_progress(false),
+    )?;
+
+    mark_bert_cached();
+    Ok(model)
+}
+
 fn get_model() -> anyhow::Result<&'static fastembed::TextEmbedding> {
-    MODEL_CACHE.get_or_try_init(|| {
-        use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
-
-        if !bert_is_cached() {
-            eprintln!("[ccr] downloading BERT model (~90 MB, one-time setup)...");
-            eprintln!("[ccr] this may take a minute. future runs are instant.");
-        }
-
-        let model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::AllMiniLML6V2).with_show_download_progress(false),
-        )?;
-
-        mark_bert_cached();
-        Ok(model)
-    })
+    MODEL_CACHE.get_or_try_init(|| load_model(get_model_name()))
 }
 
 /// Pre-warm the BERT model — downloads and caches it if not already present.
@@ -201,9 +262,10 @@ fn summarize_semantic_intent(
         .collect();
 
     // Hard-keep critical lines
+    let critical = effective_critical_pattern();
     let mut selected: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for (orig_idx, line) in lines.iter().enumerate() {
-        if critical_pattern().is_match(line) {
+        if critical.is_match(line) {
             selected.insert(orig_idx);
         }
     }
@@ -318,9 +380,10 @@ fn summarize_semantic(
         .collect();
 
     // Hard-keep critical lines
+    let critical = effective_critical_pattern();
     let mut selected: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for (orig_idx, line) in lines.iter().enumerate() {
-        if critical_pattern().is_match(line) {
+        if critical.is_match(line) {
             selected.insert(orig_idx);
         }
     }
@@ -449,9 +512,10 @@ fn summarize_semantic_anchored(
         .collect();
 
     // Hard-keep critical lines
+    let critical = effective_critical_pattern();
     let mut selected: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for (orig_idx, line) in lines.iter().enumerate() {
-        if critical_pattern().is_match(line) {
+        if critical.is_match(line) {
             selected.insert(orig_idx);
         }
     }
@@ -851,7 +915,7 @@ fn do_cluster_summarize(lines: &[&str], budget: usize) -> anyhow::Result<String>
                 (first, 0.0)
             });
             let orig_idx = indexed[mi].0;
-            let is_crit = critical_pattern().is_match(indexed[mi].1);
+            let is_crit = effective_critical_pattern().is_match(indexed[mi].1);
             (orig_idx, sizes[cid], score, is_crit)
         })
         .collect();
@@ -956,9 +1020,10 @@ fn summarize_against_centroid_inner(
         .collect();
 
     // Hard-keep critical lines
+    let critical = effective_critical_pattern();
     let mut selected: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for (orig_idx, line) in lines.iter().enumerate() {
-        if critical_pattern().is_match(line) {
+        if critical.is_match(line) {
             selected.insert(orig_idx);
         }
     }
@@ -1062,6 +1127,28 @@ pub fn noise_scores(lines: &[&str]) -> anyhow::Result<Vec<f32>> {
 pub fn embed_batch(texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
     let model = get_model()?;
     Ok(model.embed(texts.to_vec(), None)?)
+}
+
+/// Compute the mean embedding of all non-empty lines in `text`.
+/// Used to update per-command historical centroids with line-mean quality
+/// rather than embedding the whole text as a single string.
+/// Returns a zero vector if the input has no non-empty lines.
+pub fn compute_output_centroid(text: &str) -> anyhow::Result<Vec<f32>> {
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.is_empty() {
+        return Ok(vec![0.0f32; 384]);
+    }
+    let embeddings = embed_batch(&lines)?;
+    let dim = embeddings[0].len();
+    let mut centroid = vec![0.0f32; dim];
+    for emb in &embeddings {
+        for (c, v) in centroid.iter_mut().zip(emb.iter()) {
+            *c += v;
+        }
+    }
+    let n = embeddings.len() as f32;
+    centroid.iter_mut().for_each(|c| *c /= n);
+    Ok(centroid)
 }
 
 /// Compute semantic similarity between two texts. Used as a quality gate on generative output.

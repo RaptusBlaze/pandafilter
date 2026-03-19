@@ -31,6 +31,64 @@ patterns = [
   { regex = "^Removing intermediate container.*", action = "Remove" },
 ]
 
+[commands.kubectl]
+patterns = [
+  { regex = "^[WIE]\\d{4}\\s+", action = "Remove" },
+  { regex = "^Warning:.*deprecated.*", action = "Remove" },
+  { regex = "^resource mapping not found.*", action = "Remove" },
+]
+
+[commands.terraform]
+patterns = [
+  { regex = "^\\s*Refreshing state\\.\\.\\.", action = "Collapse" },
+  { regex = "^\\s*Reading\\.\\.\\.", action = "Collapse" },
+  { regex = "^\\s*[╷╵│].*", action = "Remove" },
+]
+
+[commands.brew]
+patterns = [
+  { regex = "^==> Downloading https://", action = "Collapse" },
+  { regex = "^==> Fetching dependencies", action = "Remove" },
+  { regex = "^Already downloaded:", action = "Remove" },
+]
+
+[commands.go]
+patterns = [
+  { regex = "^go: downloading ", action = "Collapse" },
+  { regex = "^go: finding module ", action = "Remove" },
+  { regex = "^go: extracting ", action = "Remove" },
+]
+
+[commands.helm]
+patterns = [
+  { regex = "^coalesce\\.go:\\d+", action = "Remove" },
+]
+
+[commands.pip]
+patterns = [
+  { regex = "^Collecting \\S+", action = "Collapse" },
+  { regex = "^  Downloading ", action = "Remove" },
+  { regex = "^  Using cached ", action = "Remove" },
+  { regex = "^Installing collected packages:", action = "Remove" },
+]
+
+[commands.make]
+patterns = [
+  { regex = "^make\\[\\d+\\]: Entering directory", action = "Remove" },
+  { regex = "^make\\[\\d+\\]: Leaving directory", action = "Remove" },
+  { regex = "^make\\[\\d+\\]: Nothing to be done", action = "Remove" },
+]
+
+[commands.tsc]
+patterns = [
+  { regex = "^TS\\d+: Build info file ", action = "Remove" },
+]
+
+[commands.gh]
+patterns = [
+  { regex = "^✓ ", action = "Remove" },
+]
+
 [tee]
 enabled = true
 mode = "aggressive"

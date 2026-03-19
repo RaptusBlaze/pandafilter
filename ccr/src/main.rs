@@ -55,9 +55,40 @@ enum Commands {
     },
     /// Scan Claude Code history and report missed optimization opportunities
     Discover,
+    /// Compress a conversation JSON to reduce token count
+    Compress {
+        /// Path to conversation JSON file (use - for stdin)
+        #[arg(default_value = "-")]
+        input: String,
+        /// Write compressed output to file (default: stdout)
+        #[arg(long, short = 'o')]
+        output: Option<String>,
+        /// Number of most-recent turns to preserve verbatim
+        #[arg(long, default_value = "3")]
+        recent_turns: usize,
+        /// Number of tier-1 turns (moderate compression) after recent turns
+        #[arg(long, default_value = "5")]
+        tier1_turns: usize,
+        /// Ollama base URL for generative summarization (optional)
+        #[arg(long)]
+        ollama: Option<String>,
+        /// Ollama model to use
+        #[arg(long, default_value = "mistral:instruct")]
+        ollama_model: String,
+        /// Target token budget (compress until under this limit)
+        #[arg(long)]
+        max_tokens: Option<usize>,
+    },
 }
 
 fn main() {
+    // Apply config-driven model selection and extra keep patterns before any BERT use.
+    // set_model_name is no-op after first call, so this must run before any summarization.
+    if let Ok(config) = config_loader::load_config() {
+        ccr_core::summarizer::set_model_name(&config.global.bert_model);
+        ccr_core::summarizer::set_extra_keep_patterns(config.global.hard_keep_patterns.clone());
+    }
+
     let cli = Cli::parse();
     let result = match cli.command {
         Commands::Filter { command } => cmd::filter::run(command),
@@ -68,6 +99,8 @@ fn main() {
         Commands::Rewrite { command } => cmd::rewrite::run(command),
         Commands::Proxy { args } => cmd::proxy::run(args),
         Commands::Discover => cmd::discover::run(),
+        Commands::Compress { input, output, recent_turns, tier1_turns, ollama, ollama_model, max_tokens } =>
+            cmd::compress::run(&input, output.as_deref(), recent_turns, tier1_turns, ollama.as_deref(), &ollama_model, max_tokens),
     };
     if let Err(e) = result {
         eprintln!("ccr error: {}", e);

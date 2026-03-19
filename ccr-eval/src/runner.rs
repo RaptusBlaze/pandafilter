@@ -74,7 +74,7 @@ pub fn run_fixture(txt_path: &Path, qa_path: &Path, api_key: &str) -> Result<Fix
         .unwrap_or_default();
     let pipeline = Pipeline::new(config);
     let hint = if qa.command_hint.is_empty() { None } else { Some(qa.command_hint.as_str()) };
-    let pipeline_result = pipeline.process(&input, hint, None)?;
+    let pipeline_result = pipeline.process(&input, hint, None, None)?;
     let compressed = &pipeline_result.output;
 
     let lines_in = input.lines().count();

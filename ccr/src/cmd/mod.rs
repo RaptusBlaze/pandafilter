@@ -1,3 +1,4 @@
+pub mod compress;
 pub mod discover;
 pub mod filter;
 pub mod gain;

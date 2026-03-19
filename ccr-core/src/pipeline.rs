@@ -3,11 +3,17 @@ use crate::ansi::strip_ansi;
 use crate::config::CcrConfig;
 use crate::patterns::PatternFilter;
 use crate::summarizer::{
-    entropy_adjusted_budget, noise_scores, summarize_with_anchoring,
+    entropy_adjusted_budget, noise_scores, summarize_against_centroid, summarize_with_anchoring,
     summarize_with_clustering, summarize_with_intent, summarize_with_query,
 };
 use crate::tokens::count_tokens;
 use crate::whitespace::normalize;
+
+/// Inputs above this line count are split into chunks for BERT processing,
+/// reducing peak memory usage. Each chunk is summarized independently.
+const CHUNK_THRESHOLD_LINES: usize = 2000;
+/// Lines per chunk when chunked processing is active.
+const CHUNK_SIZE_LINES: usize = 500;
 
 pub struct PipelineResult {
     pub output: String,
@@ -26,11 +32,14 @@ impl Pipeline {
     /// Process output through the pipeline.
     /// `command_hint` selects command-specific pattern rules.
     /// `query` biases BERT importance scoring toward task-relevant lines when provided.
+    /// `historical_centroid` — when `Some`, scoring is done against what this command
+    ///   *usually* produces, so only genuinely new/anomalous lines are kept.
     pub fn process(
         &self,
         input: &str,
         command_hint: Option<&str>,
         query: Option<&str>,
+        historical_centroid: Option<&[f32]>,
     ) -> anyhow::Result<PipelineResult> {
         let input_tokens = count_tokens(input);
 
@@ -78,24 +87,13 @@ impl Pipeline {
                 // Entropy-adaptive budget: diverse content gets more lines
                 let budget = entropy_adjusted_budget(&text, max_budget);
 
-                // 4c. Context-aware summarizer selection
-                text = match (query, command_hint) {
-                    (Some(q), Some(cmd)) if !q.is_empty() => {
-                        // command + query: bias toward the user's stated intent
-                        summarize_with_intent(&text, budget, cmd, q).output
-                    }
-                    (Some(q), _) if !q.is_empty() => {
-                        // query only: BERT-biased toward task-relevant lines
-                        summarize_with_query(&text, budget, q).output
-                    }
-                    (_, Some(_)) => {
-                        // command known, no query: cluster similar lines (e.g. repeated compile output)
-                        summarize_with_clustering(&text, budget).output
-                    }
-                    _ => {
-                        // no context: keep anomalous lines + their surrounding context
-                        summarize_with_anchoring(&text, budget, 1).output
-                    }
+                // 4c. Context-aware summarizer selection.
+                // For very large inputs, split into chunks to reduce peak memory.
+                let line_count = text.lines().count();
+                text = if line_count > CHUNK_THRESHOLD_LINES {
+                    self.summarize_chunked(&text, budget, command_hint, query, historical_centroid)
+                } else {
+                    self.summarize_single(&text, budget, command_hint, query, historical_centroid)
                 };
             }
         }
@@ -104,6 +102,70 @@ impl Pipeline {
         let analytics = Analytics::compute(input_tokens, output_tokens);
 
         Ok(PipelineResult { output: text, analytics })
+    }
+
+    /// Summarize a single block of text using the context-aware strategy.
+    /// Priority: centroid (historical) > query+command > query > command > anchoring.
+    fn summarize_single(
+        &self,
+        text: &str,
+        budget: usize,
+        command_hint: Option<&str>,
+        query: Option<&str>,
+        historical_centroid: Option<&[f32]>,
+    ) -> String {
+        match (query, command_hint, historical_centroid) {
+            // query always wins when present — user intent overrides history
+            (Some(q), Some(cmd), _) if !q.is_empty() => {
+                summarize_with_intent(text, budget, cmd, q).output
+            }
+            (Some(q), _, _) if !q.is_empty() => {
+                summarize_with_query(text, budget, q).output
+            }
+            // historical centroid: score against what this command usually produces
+            (None, Some(_), Some(centroid)) => {
+                summarize_against_centroid(text, budget, centroid).output
+            }
+            (_, Some(_), _) => {
+                summarize_with_clustering(text, budget).output
+            }
+            _ => {
+                summarize_with_anchoring(text, budget, 1).output
+            }
+        }
+    }
+
+    /// Summarize a very large input by splitting into chunks of `CHUNK_SIZE_LINES`
+    /// lines, summarizing each independently, then concatenating the results.
+    /// Reduces peak memory compared to processing all lines at once.
+    fn summarize_chunked(
+        &self,
+        text: &str,
+        budget_per_chunk: usize,
+        command_hint: Option<&str>,
+        query: Option<&str>,
+        historical_centroid: Option<&[f32]>,
+    ) -> String {
+        let lines: Vec<&str> = text.lines().collect();
+        let mut parts: Vec<String> = Vec::new();
+
+        for chunk in lines.chunks(CHUNK_SIZE_LINES) {
+            let chunk_text = chunk.join("\n");
+            if chunk_text.trim().is_empty() {
+                continue;
+            }
+            let summary = self.summarize_single(&chunk_text, budget_per_chunk, command_hint, query, historical_centroid);
+            if !summary.trim().is_empty() {
+                parts.push(summary);
+            }
+        }
+
+        if parts.len() <= 1 {
+            return parts.into_iter().next().unwrap_or_default();
+        }
+
+        // Join chunk summaries with a separator so the reader knows output was chunked
+        parts.join(&format!("\n[--- {} more lines ---]\n", CHUNK_SIZE_LINES))
     }
 }
 
@@ -121,7 +183,7 @@ mod tests {
     fn pipeline_strips_ansi_then_deduplicates() {
         let pipeline = default_pipeline();
         let input = "\x1b[32mgreen\x1b[0m\n\x1b[32mgreen\x1b[0m";
-        let result = pipeline.process(input, None, None).unwrap();
+        let result = pipeline.process(input, None, None, None).unwrap();
         assert_eq!(result.output.trim(), "green");
     }
 
@@ -140,7 +202,7 @@ mod tests {
         let config = CcrConfig { commands, ..CcrConfig::default() };
         let pipeline = Pipeline::new(config);
         let input = "   Compiling foo v1.0\n   Compiling bar v1.0\nerror[E0001]: bad";
-        let result = pipeline.process(input, Some("cargo"), None).unwrap();
+        let result = pipeline.process(input, Some("cargo"), None, None).unwrap();
         assert!(result.output.contains("collapsed") || result.output.contains("Compiling"));
         assert!(result.output.contains("error[E0001]"));
     }
@@ -160,7 +222,7 @@ mod tests {
         let config = CcrConfig { commands, ..CcrConfig::default() };
         let pipeline = Pipeline::new(config);
         let input = "   Compiling foo v1.0\n   Compiling bar v1.0";
-        let result = pipeline.process(input, None, None).unwrap();
+        let result = pipeline.process(input, None, None, None).unwrap();
         assert!(result.output.contains("Compiling"));
     }
 
@@ -168,7 +230,7 @@ mod tests {
     fn returns_correct_analytics() {
         let pipeline = default_pipeline();
         let input = "hello world";
-        let result = pipeline.process(input, None, None).unwrap();
+        let result = pipeline.process(input, None, None, None).unwrap();
         assert!(result.analytics.input_tokens > 0);
         assert!(result.analytics.output_tokens > 0);
         assert!(result.analytics.savings_pct >= 0.0);

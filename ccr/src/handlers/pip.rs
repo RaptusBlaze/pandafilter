@@ -3,6 +3,23 @@ use super::Handler;
 pub struct PipHandler;
 
 impl Handler for PipHandler {
+    fn rewrite_args(&self, args: &[String]) -> Vec<String> {
+        let subcmd = args.get(1).map(|s| s.as_str()).unwrap_or("");
+        // uv doesn't support -q the same way; leave uv args unchanged
+        let is_uv = args.get(0).map(|s| s.as_str()).unwrap_or("") == "uv";
+        if !is_uv && (subcmd == "install" || subcmd == "add") {
+            if args.iter().any(|a| a == "-q" || a == "--quiet") {
+                args.to_vec()
+            } else {
+                let mut out = args.to_vec();
+                out.push("-q".to_string());
+                out
+            }
+        } else {
+            args.to_vec()
+        }
+    }
+
     fn filter(&self, output: &str, args: &[String]) -> String {
         let cmd = args.get(0).map(|s| s.as_str()).unwrap_or("");
         let subcmd = args.get(1).map(|s| s.as_str()).unwrap_or("");

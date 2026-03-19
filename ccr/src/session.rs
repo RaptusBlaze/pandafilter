@@ -20,7 +20,9 @@ pub struct SessionEntry {
     pub tokens: usize,
     /// BERT embedding of the filtered output (384-dim).
     pub embedding: Vec<f32>,
-    /// First 600 chars of filtered output — used by sentence-level dedup (C1).
+    /// First 4000 chars of filtered output — used by delta compression (Idea 3) and
+    /// sentence-level dedup (C1). 4000 chars ≈ 30-50 lines, enough for meaningful
+    /// line-level delta matching. (Was 600, which was too short for real outputs.)
     pub content_preview: String,
 }
 
@@ -132,7 +134,7 @@ impl SessionState {
             ts: now_secs(),
             tokens,
             embedding,
-            content_preview: content.chars().take(600).collect(),
+            content_preview: content.chars().take(4000).collect(),
         };
 
         self.entries.push(entry);
@@ -222,12 +224,12 @@ impl SessionState {
         // Lines with high similarity to any sentence in the prior output are "same".
         let model = ccr_core::summarizer::embed_batch(new_lines).ok()?;
 
-        // Embed sentences from prior content for line-level comparison
-        let prior_sentences: Vec<&str> = prior.content_preview.lines().collect();
-        if prior_sentences.is_empty() {
+        // Embed lines from prior content for line-level comparison
+        let prior_lines: Vec<&str> = prior.content_preview.lines().collect();
+        if prior_lines.is_empty() {
             return None;
         }
-        let prior_embs = ccr_core::summarizer::embed_batch(&prior_sentences).ok()?;
+        let prior_embs = ccr_core::summarizer::embed_batch(&prior_lines).ok()?;
 
         const LINE_MATCH_THRESHOLD: f32 = 0.88;
         let mut new_lines_out: Vec<String> = Vec::new();

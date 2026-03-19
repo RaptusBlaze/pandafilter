@@ -98,10 +98,6 @@ fn get_handler_exact(cmd: &str) -> Option<Box<dyn Handler>> {
     }
 }
 
-/// Returns true if `cmd` is a known handler command.
-pub fn is_known(cmd: &str) -> bool {
-    get_handler(cmd).is_some()
-}
 
 // ── Level 2: Static alias / pattern routing ───────────────────────────────────
 
