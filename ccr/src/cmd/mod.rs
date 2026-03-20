@@ -7,3 +7,4 @@ pub mod noise;
 pub mod proxy;
 pub mod rewrite;
 pub mod run;
+pub mod update;

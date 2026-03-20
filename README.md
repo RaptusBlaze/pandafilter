@@ -146,6 +146,26 @@ When CCR collapses output, it embeds an ID in the marker:
 [5 lines collapsed — ccr expand ZI_3]
 ```
 
+### ccr update
+
+```bash
+ccr update
+```
+
+Checks the latest release on GitHub and replaces the binary in-place if a newer version is available. Also re-runs `ccr init` to refresh hooks with the new binary path.
+
+```
+Checking for updates (current: v0.5.3)...
+Update available: v0.5.3 → v0.5.4
+Downloading ccr-macos-arm64...
+Updated to v0.5.4.
+Re-registering hooks...
+Done.
+
+Checking for updates (current: v0.5.4)...
+Already up to date (v0.5.4).
+```
+
 ### ccr discover
 
 Scans `~/.claude/projects/*/` JSONL history for Bash commands that ran without CCR. Reports estimated missed savings.

@@ -74,6 +74,8 @@ enum Commands {
         #[arg(long)]
         reset: bool,
     },
+    /// Update CCR to the latest release
+    Update,
     /// Compress a conversation JSON to reduce token count
     Compress {
         /// Path to conversation JSON file (use - for stdin)
@@ -120,6 +122,7 @@ fn main() {
         Commands::Discover => cmd::discover::run(),
         Commands::Expand { id, list } => cmd::expand::run(id.as_deref().unwrap_or(""), list),
         Commands::Noise { reset } => cmd::noise::run(reset),
+        Commands::Update => cmd::update::run(),
         Commands::Compress { input, output, recent_turns, tier1_turns, ollama, ollama_model, max_tokens } =>
             cmd::compress::run(&input, output.as_deref(), recent_turns, tier1_turns, ollama.as_deref(), &ollama_model, max_tokens),
     };
