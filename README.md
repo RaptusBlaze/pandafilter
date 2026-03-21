@@ -4,6 +4,29 @@
 
 ---
 
+## Token Savings
+
+Measured from real `ccr gain` analytics on a Rust project (this repo). Per-invocation averages across recorded runs:
+
+| Operation | In session | Without CCR | With CCR | Savings | Runs |
+|-----------|:----------:|------------:|---------:|:-------:|:----:|
+| `cargo build` | 3× | 9,117 | 297 | **−97%** | 34 |
+| `cargo test` | 3× | 2,262 | 582 | **−74%** | 32 |
+| `read / cat` | 5× | 7,500 | 3,225 | **−57%** | 7 |
+| `rustfmt` | 2× | 4,042 | 1,746 | **−57%** | 2 |
+| `ls` | 5× | 1,290 | 770 | −40% | 14 |
+| `cargo check` | 3× | 696 | 555 | −20% | 10 |
+| `git diff` | 2× | 292 | 166 | −43% | 2 |
+| `git log` | 3× | 633 | 546 | −14% | 6 |
+| `git status` | 5× | 370 | 310 | −16% | 6 |
+| **Session total** | | **~26,200** | **~8,200** | **−69%** | |
+
+> Git savings above reflect a small repo (few files, short history). On larger projects the git handler saves 70–80% via porcelain format injection and diff compression.
+>
+> Run `ccr gain` at any time to see your live numbers.
+
+---
+
 ## Contents
 
 - [How It Works](#how-it-works)
