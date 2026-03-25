@@ -16,11 +16,8 @@ impl Handler for GitHandler {
                 }
             }
             "status" => {
-                // Inject --porcelain -b so filter_status gets XY format + branch line
-                let has_porcelain = args.iter().any(|a| a == "--porcelain" || a == "--short" || a == "-s");
-                if !has_porcelain {
+                if !args.iter().any(|a| a == "--porcelain" || a == "--short" || a == "-s") {
                     let mut out = args.to_vec();
-                    out.insert(2, "-b".to_string());
                     out.insert(2, "--porcelain".to_string());
                     return out;
                 }
@@ -51,18 +48,11 @@ fn filter_status(output: &str) -> String {
         return "nothing to commit, working tree clean".to_string();
     }
 
-    let mut branch_line: Option<String> = None;
     let mut staged: Vec<String> = Vec::new();
     let mut modified: Vec<String> = Vec::new();
     let mut untracked: Vec<String> = Vec::new();
-    let mut conflicts: usize = 0;
 
     for line in output.lines() {
-        // Porcelain -b branch line: "## main...origin/main [ahead 2]"
-        if line.starts_with("## ") {
-            branch_line = Some(parse_branch_line(&line[3..]));
-            continue;
-        }
         if line.trim().is_empty()
             || line.trim().starts_with("(use \"git")
             || line.trim().starts_with("no changes added")
@@ -84,12 +74,6 @@ fn filter_status(output: &str) -> String {
             continue;
         }
 
-        // Unmerged / conflict states: DD, AU, UD, UA, DU, AA, UU
-        if x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D') {
-            conflicts += 1;
-            continue;
-        }
-
         let rest = line.get(3..).unwrap_or("").trim().to_string();
         if rest.is_empty() {
             continue;
@@ -102,92 +86,41 @@ fn filter_status(output: &str) -> String {
         }
     }
 
-    if staged.is_empty() && modified.is_empty() && untracked.is_empty() && conflicts == 0 {
+    if staged.is_empty() && modified.is_empty() && untracked.is_empty() {
         return "nothing to commit, working tree clean".to_string();
     }
 
     let mut out: Vec<String> = Vec::new();
 
-    if let Some(b) = branch_line {
-        out.push(b);
+    out.push(format!(
+        "Staged: {} · Modified: {} · Untracked: {}",
+        staged.len(),
+        modified.len(),
+        untracked.len()
+    ));
+
+    const MAX_STAGED_MODIFIED: usize = 15;
+    let sm_combined: Vec<&String> = staged.iter().chain(modified.iter()).collect();
+    let sm_shown = MAX_STAGED_MODIFIED.min(sm_combined.len());
+    for entry in &sm_combined[..sm_shown] {
+        out.push(format!("  {}", entry));
+    }
+    let sm_extra = sm_combined.len().saturating_sub(sm_shown);
+    if sm_extra > 0 {
+        out.push(format!("[+{} more staged/modified]", sm_extra));
     }
 
-    if conflicts > 0 {
-        out.push(format!("! Conflicts: {} files", conflicts));
-    }
-
-    const MAX_STAGED: usize = 15;
-    const MAX_MODIFIED: usize = 15;
     const MAX_UNTRACKED: usize = 10;
-
-    if !staged.is_empty() {
-        out.push(format!("+ Staged: {} files", staged.len()));
-        for f in staged.iter().take(MAX_STAGED) {
-            out.push(format!("   {}", f));
-        }
-        let extra = staged.len().saturating_sub(MAX_STAGED);
-        if extra > 0 {
-            out.push(format!("   [+{} more]", extra));
-        }
+    let ut_shown = MAX_UNTRACKED.min(untracked.len());
+    for entry in &untracked[..ut_shown] {
+        out.push(format!("  {}", entry));
     }
-
-    if !modified.is_empty() {
-        out.push(format!("~ Modified: {} files", modified.len()));
-        for f in modified.iter().take(MAX_MODIFIED) {
-            out.push(format!("   {}", f));
-        }
-        let extra = modified.len().saturating_sub(MAX_MODIFIED);
-        if extra > 0 {
-            out.push(format!("   [+{} more]", extra));
-        }
-    }
-
-    if !untracked.is_empty() {
-        out.push(format!("? Untracked: {} files", untracked.len()));
-        for f in untracked.iter().take(MAX_UNTRACKED) {
-            out.push(format!("   {}", f));
-        }
-        let extra = untracked.len().saturating_sub(MAX_UNTRACKED);
-        if extra > 0 {
-            out.push(format!("   [+{} more]", extra));
-        }
+    let ut_extra = untracked.len().saturating_sub(ut_shown);
+    if ut_extra > 0 {
+        out.push(format!("[+{} more untracked]", ut_extra));
     }
 
     out.join("\n")
-}
-
-/// Parse `main...origin/main [ahead 2, behind 1]` into a compact branch summary.
-fn parse_branch_line(rest: &str) -> String {
-    // "main...origin/main [ahead 2]" or "HEAD (no branch)" or "main"
-    if rest.starts_with("HEAD (no branch)") {
-        return "* HEAD (detached)".to_string();
-    }
-    let (tracking, sync) = if let Some(idx) = rest.find("...") {
-        let branch = &rest[..idx];
-        let tail = &rest[idx + 3..];
-        // tail may be "origin/main [ahead 2, behind 1]" or "origin/main"
-        let remote = tail.split_whitespace().next().unwrap_or("");
-        let info = if let Some(start) = tail.find('[') {
-            tail[start..].trim_matches(|c| c == '[' || c == ']').to_string()
-        } else {
-            String::new()
-        };
-        let remote_short = remote.splitn(2, '/').nth(1).unwrap_or(remote);
-        let sync_str = if info.is_empty() {
-            format!("== {}", remote_short)
-        } else {
-            format!("{} ({})", remote_short, info)
-        };
-        (branch.to_string(), sync_str)
-    } else {
-        (rest.trim().to_string(), String::new())
-    };
-
-    if sync.is_empty() {
-        format!("* {}", tracking)
-    } else {
-        format!("* {}...{}", tracking, sync)
-    }
 }
 
 // ─── log ─────────────────────────────────────────────────────────────────────
@@ -236,9 +169,6 @@ const DIFF_TOTAL_CAP: usize = 500;
 fn filter_diff(output: &str) -> String {
     let lines: Vec<&str> = output.lines().collect();
     let mut out: Vec<String> = Vec::new();
-    let mut file_adds: usize = 0;
-    let mut file_dels: usize = 0;
-    let mut in_file = false;
     let mut hunk_lines: usize = 0;
     let mut hunk_truncated = false;
     let mut total_lines: usize = 0;
@@ -246,17 +176,10 @@ fn filter_diff(output: &str) -> String {
 
     for line in &lines {
         if global_truncated {
-            // Still tally for the last file summary
-            if line.starts_with('+') && !line.starts_with("+++") { file_adds += 1; }
-            else if line.starts_with('-') && !line.starts_with("---") { file_dels += 1; }
             continue;
         }
 
         if line.starts_with("diff --git ") {
-            // Flush previous file's +N -N summary
-            if in_file {
-                out.push(format!("  +{} -{}", file_adds, file_dels));
-            }
             // Extract "b/path" filename
             let fname = line
                 .split_whitespace()
@@ -265,9 +188,6 @@ fn filter_diff(output: &str) -> String {
                 .unwrap_or(line);
             out.push(fname.to_string());
             total_lines += 1;
-            in_file = true;
-            file_adds = 0;
-            file_dels = 0;
             hunk_lines = 0;
             hunk_truncated = false;
             continue;
@@ -292,14 +212,7 @@ fn filter_diff(output: &str) -> String {
         }
 
         // Change and context lines
-        let is_add = line.starts_with('+');
-        let is_del = line.starts_with('-');
-        let is_ctx = line.starts_with(' ');
-
-        if is_add || is_del || is_ctx {
-            if is_add { file_adds += 1; }
-            if is_del { file_dels += 1; }
-
+        if line.starts_with('+') || line.starts_with('-') || line.starts_with(' ') {
             if hunk_truncated {
                 continue;
             }
@@ -319,10 +232,6 @@ fn filter_diff(output: &str) -> String {
         }
     }
 
-    // Flush last file
-    if in_file {
-        out.push(format!("  +{} -{}", file_adds, file_dels));
-    }
     if global_truncated {
         out.push("[... diff truncated — run `git diff` for full output]".to_string());
     }
@@ -440,12 +349,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_rewrite_injects_porcelain_and_branch() {
+    fn test_rewrite_injects_porcelain() {
         let handler = GitHandler;
         let args: Vec<String> = vec!["git".into(), "status".into()];
         let rewritten = handler.rewrite_args(&args);
         assert!(rewritten.contains(&"--porcelain".to_string()), "should inject --porcelain");
-        assert!(rewritten.contains(&"-b".to_string()), "should inject -b");
     }
 
     #[test]
@@ -458,7 +366,7 @@ mod tests {
 
     #[test]
     fn test_status_clean() {
-        let output = "## main...origin/main\nOn branch main\nnothing to commit, working tree clean\n";
+        let output = "On branch main\nnothing to commit, working tree clean\n";
         assert_eq!(filter_status(output), "nothing to commit, working tree clean");
     }
 
@@ -468,24 +376,8 @@ mod tests {
     }
 
     #[test]
-    fn test_status_with_branch_line() {
-        let output = "## main...origin/main\nM  src/main.rs\n?? foo.txt\n";
-        let result = filter_status(output);
-        assert!(result.contains("main"), "branch name should appear");
-        assert!(result.contains("Staged:"), "got: {}", result);
-        assert!(result.contains("Untracked:"), "got: {}", result);
-    }
-
-    #[test]
-    fn test_status_branch_ahead() {
-        let output = "## feature/foo...origin/feature/foo [ahead 3]\nM  src/lib.rs\n";
-        let result = filter_status(output);
-        assert!(result.contains("ahead 3"), "got: {}", result);
-    }
-
-    #[test]
     fn test_status_staged_and_untracked() {
-        let output = "## main...origin/main\nM  src/main.rs\nA  src/new.rs\n?? untracked.txt\n?? other.txt\n";
+        let output = "M  src/main.rs\nA  src/new.rs\n?? untracked.txt\n?? other.txt\n";
         let result = filter_status(output);
         assert!(result.contains("Staged: 2"), "expected Staged: 2, got: {}", result);
         assert!(result.contains("Untracked: 2"), "expected Untracked: 2, got: {}", result);
@@ -495,7 +387,7 @@ mod tests {
 
     #[test]
     fn test_status_modified_unstaged() {
-        let output = "## main\n M src/lib.rs\n?? foo.txt\n";
+        let output = " M src/lib.rs\n?? foo.txt\n";
         let result = filter_status(output);
         assert!(result.contains("Modified: 1"), "got: {}", result);
         assert!(result.contains("Untracked: 1"), "got: {}", result);
@@ -503,13 +395,12 @@ mod tests {
 
     #[test]
     fn test_status_caps_overflow() {
-        // 20 modified files — should cap at 15 and show +5 more
-        let mut output = "## main\n".to_string();
+        let mut output = String::new();
         for i in 0..20 {
             output.push_str(&format!(" M src/file{}.rs\n", i));
         }
         let result = filter_status(&output);
-        assert!(result.contains("[+5 more]"), "got: {}", result);
+        assert!(result.contains("[+5 more staged/modified]"), "got: {}", result);
     }
 
     #[test]
@@ -520,7 +411,6 @@ mod tests {
         }
         let result = filter_diff(&input);
         assert!(result.contains("[...truncated...]"), "should truncate at 30 lines, got: {}", result);
-        assert!(result.contains("+35 -0"), "should show tally, got: {}", result);
     }
 
     #[test]
@@ -545,7 +435,9 @@ mod tests {
     fn test_diff_per_file_tally() {
         let output = "diff --git a/foo.rs b/foo.rs\n--- a/foo.rs\n+++ b/foo.rs\n@@ -1,3 +1,4 @@\n-old\n+new\n+extra\n context\n";
         let result = filter_diff(output);
-        assert!(result.contains("+2 -1"), "tally should appear, got: {}", result);
+        assert!(result.contains("foo.rs"), "filename should appear, got: {}", result);
+        assert!(result.contains("+new"), "added line should appear, got: {}", result);
+        assert!(!result.contains("+2 -1"), "tally should not appear, got: {}", result);
     }
 
     #[test]
