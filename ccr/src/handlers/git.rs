@@ -164,15 +164,43 @@ fn filter_log(output: &str) -> String {
 
 /// Hard cap per hunk and across the whole diff.
 const HUNK_LINE_CAP: usize = 30;
-const DIFF_TOTAL_CAP: usize = 500;
+/// Total line budget for the whole diff output.
+const DIFF_TOTAL_CAP: usize = 200;
+/// Maximum context lines kept on each side of a changed block.
+const MAX_CONTEXT_PER_SIDE: usize = 2;
 
 fn filter_diff(output: &str) -> String {
     let lines: Vec<&str> = output.lines().collect();
     let mut out: Vec<String> = Vec::new();
+
+    // Per-file change tally (flushed when a new file starts or at end)
+    let mut file_header_idx: Option<usize> = None;
+    let mut file_added: usize = 0;
+    let mut file_removed: usize = 0;
+
     let mut hunk_lines: usize = 0;
     let mut hunk_truncated = false;
     let mut total_lines: usize = 0;
     let mut global_truncated = false;
+
+    // Context trimming state: buffer context lines; flush only the last
+    // MAX_CONTEXT_PER_SIDE when the next changed line arrives.
+    let mut ctx_after: usize = 0;   // context lines already emitted after last change
+    let mut ctx_pending: Vec<String> = Vec::new(); // suppressed context awaiting next change
+
+    // Flush the per-file tally into the file header line.
+    macro_rules! flush_file_tally {
+        () => {
+            if let Some(idx) = file_header_idx {
+                if file_added > 0 || file_removed > 0 {
+                    out[idx] = format!("{} [+{} -{}]", out[idx], file_added, file_removed);
+                }
+                file_header_idx = None;
+                file_added = 0;
+                file_removed = 0;
+            }
+        };
+    }
 
     for line in &lines {
         if global_truncated {
@@ -180,12 +208,17 @@ fn filter_diff(output: &str) -> String {
         }
 
         if line.starts_with("diff --git ") {
-            // Extract "b/path" filename
+            // Flush pending context and file tally before starting new file
+            ctx_pending.clear();
+            ctx_after = 0;
+            flush_file_tally!();
+
             let fname = line
                 .split_whitespace()
                 .last()
                 .and_then(|s| s.strip_prefix("b/"))
                 .unwrap_or(line);
+            file_header_idx = Some(out.len());
             out.push(fname.to_string());
             total_lines += 1;
             hunk_lines = 0;
@@ -202,8 +235,10 @@ fn filter_diff(output: &str) -> String {
             continue;
         }
 
-        // Hunk header
+        // Hunk header: reset per-hunk state but keep context trimming state clean
         if line.starts_with("@@") {
+            ctx_pending.clear();
+            ctx_after = 0;
             hunk_lines = 0;
             hunk_truncated = false;
             out.push(hunk_context(line));
@@ -211,26 +246,76 @@ fn filter_diff(output: &str) -> String {
             continue;
         }
 
-        // Change and context lines
-        if line.starts_with('+') || line.starts_with('-') || line.starts_with(' ') {
+        // Context lines (' '): buffer after MAX_CONTEXT_PER_SIDE trailing lines
+        if line.starts_with(' ') {
             if hunk_truncated {
                 continue;
             }
+            if ctx_after < MAX_CONTEXT_PER_SIDE {
+                out.push(line.to_string());
+                hunk_lines += 1;
+                total_lines += 1;
+                ctx_after += 1;
+                if total_lines >= DIFF_TOTAL_CAP {
+                    global_truncated = true;
+                }
+            } else {
+                // Suppress but keep the most recent lines for leading context
+                ctx_pending.push(line.to_string());
+            }
+            continue;
+        }
+
+        // Changed lines ('+'/'-')
+        if line.starts_with('+') || line.starts_with('-') {
+            if hunk_truncated {
+                if line.starts_with('+') {
+                    file_added += 1;
+                } else {
+                    file_removed += 1;
+                }
+                continue;
+            }
+
+            // Flush up to MAX_CONTEXT_PER_SIDE leading context from pending buffer
+            if !ctx_pending.is_empty() {
+                let skip = ctx_pending.len().saturating_sub(MAX_CONTEXT_PER_SIDE);
+                for ctx_line in ctx_pending.drain(skip..) {
+                    if !global_truncated {
+                        out.push(ctx_line);
+                        hunk_lines += 1;
+                        total_lines += 1;
+                        if total_lines >= DIFF_TOTAL_CAP {
+                            global_truncated = true;
+                        }
+                    }
+                }
+                ctx_pending.clear();
+            }
+            ctx_after = 0;
+
             if hunk_lines >= HUNK_LINE_CAP {
                 hunk_truncated = true;
                 out.push("  [...truncated...]".to_string());
                 total_lines += 1;
-                continue;
-            }
-            out.push(line.to_string());
-            hunk_lines += 1;
-            total_lines += 1;
-
-            if total_lines >= DIFF_TOTAL_CAP {
-                global_truncated = true;
+            } else if !global_truncated {
+                if line.starts_with('+') {
+                    file_added += 1;
+                } else {
+                    file_removed += 1;
+                }
+                out.push(line.to_string());
+                hunk_lines += 1;
+                total_lines += 1;
+                if total_lines >= DIFF_TOTAL_CAP {
+                    global_truncated = true;
+                }
             }
         }
     }
+
+    // Flush final file tally
+    flush_file_tally!();
 
     if global_truncated {
         out.push("[... diff truncated — run `git diff` for full output]".to_string());
@@ -437,7 +522,8 @@ mod tests {
         let result = filter_diff(output);
         assert!(result.contains("foo.rs"), "filename should appear, got: {}", result);
         assert!(result.contains("+new"), "added line should appear, got: {}", result);
-        assert!(!result.contains("+2 -1"), "tally should not appear, got: {}", result);
+        // Per-file tally is now included in the filename header
+        assert!(result.contains("[+2 -1]"), "tally should appear in header, got: {}", result);
     }
 
     #[test]

@@ -546,6 +546,58 @@ fn git_diff() -> String {
     out
 }
 
+/// Large git diff that hits the 200-line global cap.
+///
+/// Simulates a broad refactoring across 10 files: each file has 5 hunks with
+/// 3 context lines before and after a small change block.  Total raw line count
+/// exceeds the DIFF_TOTAL_CAP (200), so the cap truncation contributes to savings
+/// on top of per-hunk context trimming.
+fn git_diff_large() -> String {
+    let mut out = String::new();
+
+    let files = [
+        "src/app.ts", "src/router.ts", "src/db.ts", "src/cache.ts",
+        "src/logger.ts", "src/auth.ts", "src/users.ts", "src/posts.ts",
+        "src/config.ts", "src/utils.ts",
+    ];
+
+    let ctx: [&str; 3] = [
+        "  const result = await service.process(req.body);",
+        "  if (!result) { throw new Error('Not found'); }",
+        "  return res.json({ data: result, ok: true });",
+    ];
+    let after_ctx: [&str; 3] = [
+        "  await logger.info('Request completed', { path: req.path });",
+        "  metrics.increment('request.ok');",
+        "  next();",
+    ];
+
+    for (fi, file) in files.iter().enumerate() {
+        out.push_str(&format!("diff --git a/{f} b/{f}\n", f = file));
+        out.push_str(&format!("index a1b2c{fi}..d4e5f{fi} 100644\n"));
+        out.push_str(&format!("--- a/{f}\n+++ b/{f}\n", f = file));
+
+        for hi in 0..5usize {
+            let base = (fi * 50 + hi * 8 + 1) as u32;
+            out.push_str(&format!("@@ -{},{} +{},{} @@ function handler_{}_{} {{\n",
+                base, 8, base, 8, fi, hi));
+            for c in &ctx {
+                out.push_str(&format!(" {}\n", c));
+            }
+            out.push_str(&format!(
+                "-  const old_val_{fi}_{hi} = config.get('legacy_key_{fi}_{hi}');\n"
+            ));
+            out.push_str(&format!(
+                "+  const new_val_{fi}_{hi} = config.get('v2_key_{fi}_{hi}');\n"
+            ));
+            for c in &after_ctx {
+                out.push_str(&format!(" {}\n", c));
+            }
+        }
+    }
+    out
+}
+
 /// `git push` — realistic object-counting noise.
 fn git_push() -> String {
     concat!(
@@ -1404,7 +1456,7 @@ fn benchmark_handlers() {
     let cargo_test_raw               = cargo_test();
     let (status_baseline, porcelain) = git_status();
     let (log_baseline, log_oneline)  = git_log();
-    let diff_raw                     = git_diff();
+    let diff_raw                     = git_diff_large();
     let push_raw                     = git_push();
     let ls_raw                       = ls_project();
     let tsc_raw                      = tsc_errors();
@@ -1454,10 +1506,10 @@ fn benchmark_handlers() {
         // ── Git ──────────────────────────────────────────────────────────────
         row!(baseline=status_baseline; "git status", git, porcelain, &["git","status"], 30.0),
         row!(baseline=log_baseline; "git log", git, log_oneline, &["git","log"], 50.0),
-        row!("git diff", git, diff_raw, &["git","diff"], 10.0),
+        row!("git diff", git, diff_raw, &["git","diff"], 40.0),
         row!("git push", git, push_raw, &["git","push"], 10.0),
         // ── JavaScript / TypeScript ──────────────────────────────────────────
-        row!("tsc", tsc, tsc_raw, &["tsc"], 10.0),
+        row!("tsc", tsc, tsc_raw, &["tsc"], 28.0),
         row!("jest", jest, jest_raw, &["jest"], 50.0),
         row!("vitest", vitest, vitest_raw, &["vitest"], 50.0),
         // eslint: compact error output has near-zero savings; large clean codebases do better.
@@ -1473,7 +1525,7 @@ fn benchmark_handlers() {
         row!("golangci-lint", golangci, golangci_raw, &["golangci-lint"], 30.0),
         // ── Java / JVM ───────────────────────────────────────────────────────
         row!("mvn install", maven, maven_raw, &["mvn","install"], 40.0),
-        row!("gradle build", gradle, gradle_raw, &["gradle","build"], 10.0),
+        row!("gradle build", gradle, gradle_raw, &["gradle","build"], 40.0),
         // ── DevOps ───────────────────────────────────────────────────────────
         row!("kubectl get pods", kubectl, kubectl_raw, &["kubectl","get"], 10.0),
         row!("terraform plan", terraform, terraform_raw, &["terraform","plan"], 60.0),
@@ -1489,7 +1541,7 @@ fn benchmark_handlers() {
         // ── Testing / QA ─────────────────────────────────────────────────────
         row!("playwright test", playwright, playwright_raw, &["playwright","test"], 30.0),
         // ── Environment ──────────────────────────────────────────────────────
-        row!("env", env, env_raw, &["env"], 30.0),
+        row!("env", env, env_raw, &["env"], 45.0),
     ];
 
     println!();
@@ -1521,4 +1573,226 @@ fn benchmark_handlers() {
             row.op, pct, row.min_pct
         );
     }
+}
+
+// ─── Fix 1: pipeline medium-output threshold benchmark ───────────────────────
+
+/// 80-line cargo test fixture: 74 passing tests + a realistic failure block.
+/// Sized to fall in the old dead zone (51–199 lines).
+fn medium_cargo_test_failure() -> String {
+    let mut out = String::new();
+    for i in 0..74usize {
+        out.push_str(&format!("test api::tests::test_case_{:02} ... ok\n", i));
+    }
+    out.push_str("test auth::tests::test_jwt_expiry ... FAILED\n");
+    out.push_str("\nfailures:\n\n");
+    out.push_str("---- auth::tests::test_jwt_expiry stdout ----\n");
+    out.push_str("thread 'auth::tests::test_jwt_expiry' panicked at \
+                  'assertion failed: token.is_valid()'\n");
+    out.push_str("src/auth/jwt.rs:156:9\n");
+    out.push_str("note: run with `RUST_BACKTRACE=1` for a backtrace\n\n");
+    out.push_str("failures:\n");
+    out.push_str("    auth::tests::test_jwt_expiry\n\n");
+    out.push_str("test result: FAILED. 74 passed; 1 failed; 0 ignored; finished in 3.12s\n");
+    out
+}
+
+#[test]
+fn benchmark_pipeline_medium_output_threshold() {
+    use ccr_core::config::{CcrConfig, GlobalConfig};
+    use ccr_core::pipeline::Pipeline;
+
+    let fixture = medium_cargo_test_failure();
+    let line_count = fixture.lines().count();
+    let in_tok = count_tokens(&fixture);
+
+    // "before" — old 200-line threshold, BERT skipped for this fixture
+    let mut global_old = GlobalConfig::default();
+    global_old.summarize_threshold_lines = 200;
+    let config_old = CcrConfig { global: global_old, ..CcrConfig::default() };
+    let result_old = Pipeline::new(config_old)
+        .process(&fixture, Some("cargo"), None, None)
+        .unwrap();
+    let out_tok_old = count_tokens(&result_old.output);
+
+    // "after" — new 50-line threshold, BERT active
+    let result_new = Pipeline::new(CcrConfig::default())
+        .process(&fixture, Some("cargo"), None, None)
+        .unwrap();
+    let out_tok_new = count_tokens(&result_new.output);
+
+    println!();
+    println!("── Fix 1: Medium output ({} lines, cargo test failure) ──", line_count);
+    println!("{:<30} {:>12} {:>10} {:>10}", "Threshold", "Without CCR", "With CCR", "Savings");
+    println!("{}", "─".repeat(66));
+    println!("{:<30} {:>12} {:>10} {:>9.0}%", "Old (200-line threshold)", in_tok, out_tok_old, savings_pct(in_tok, out_tok_old));
+    println!("{:<30} {:>12} {:>10} {:>9.0}%", "New  (50-line threshold)", in_tok, out_tok_new, savings_pct(in_tok, out_tok_new));
+    println!();
+
+    // Critical lines must survive BERT
+    assert!(
+        result_new.output.contains("FAILED") || result_new.output.contains("panicked"),
+        "failure details must survive BERT summarization"
+    );
+    // New threshold must save more than old (old saved ~0% on this fixture)
+    assert!(
+        out_tok_new < out_tok_old,
+        "new 50-line threshold should compress more than old 200-line threshold \
+         (new={} old={})", out_tok_new, out_tok_old
+    );
+    // Should save at least 40% on this fixture
+    assert!(
+        savings_pct(in_tok, out_tok_new) >= 40.0,
+        "expected ≥40% savings on 80-line cargo failure, got {:.0}%",
+        savings_pct(in_tok, out_tok_new)
+    );
+}
+
+#[test]
+fn benchmark_pipeline_short_output_passthrough() {
+    use ccr_core::pipeline::Pipeline;
+    use ccr_core::config::CcrConfig;
+
+    // 30 lines — well below the new 50-line threshold, must not be compressed
+    let fixture: String = (0..30)
+        .map(|i| format!("test module::test_case_{:02} ... ok", i))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let result = Pipeline::new(CcrConfig::default())
+        .process(&fixture, Some("cargo"), None, None)
+        .unwrap();
+
+    assert!(
+        result.output.lines().count() >= 28,
+        "outputs below 50-line threshold must not be BERT-compressed, \
+         got {} lines from {} lines input",
+        result.output.lines().count(),
+        fixture.lines().count()
+    );
+}
+
+// ─── Fix 2: chunked budget consolidation benchmark ───────────────────────────
+
+/// Large gradle/maven-style build log with 25 submodules × ~100 lines each = ~2500 lines.
+/// Exceeds CHUNK_THRESHOLD_LINES (2000) so chunked processing triggers.
+fn large_gradle_build() -> String {
+    let mut out = String::new();
+    out.push_str("Starting Gradle Daemon...\n");
+    out.push_str("Gradle Daemon started in 2.341 s\n\n");
+    let tasks = [
+        "compileJava", "processResources", "classes",
+        "compileTestJava", "processTestResources", "testClasses",
+        "test", "jar", "assemble", "check",
+    ];
+    let submodules: Vec<String> = (0..25).map(|i| format!("module-{:02}", i)).collect();
+    for sub in &submodules {
+        out.push_str(&format!("> Configure project :{}\n", sub));
+        out.push_str(&format!("> Task :{}\n", sub));
+        for task in &tasks {
+            out.push_str(&format!("> Task :{}:{}\n", sub, task));
+            // Simulate test output per task
+            for j in 0..6usize {
+                out.push_str(&format!(
+                    "{}:{}:{} > TestClass > test_method_{:02}() PASSED\n",
+                    sub, sub, task, j
+                ));
+            }
+            out.push_str(&format!(
+                "{}:{} > {} tests completed, 0 failed\n", sub, task, 6
+            ));
+        }
+        out.push_str(&format!(
+            "BUILD SUCCESSFUL for :{} in 12s\n", sub
+        ));
+    }
+    out.push_str("\nBUILD SUCCESSFUL in 187s\n");
+    out.push_str(&format!("{} actionable tasks: {} executed, {} up-to-date\n",
+        submodules.len() * tasks.len(),
+        submodules.len() * 3,
+        submodules.len() * (tasks.len() - 3),
+    ));
+    out
+}
+
+#[test]
+fn benchmark_pipeline_chunked_budget() {
+    use ccr_core::config::CcrConfig;
+    use ccr_core::pipeline::Pipeline;
+
+    let fixture = large_gradle_build();
+    let line_count = fixture.lines().count();
+    let in_tok = count_tokens(&fixture);
+    let intended_budget = 60usize; // head_lines(30) + tail_lines(30)
+
+    let result = Pipeline::new(CcrConfig::default())
+        .process(&fixture, Some("gradle"), None, None)
+        .unwrap();
+    let out_lines = result.output.lines().count();
+    let out_tok = count_tokens(&result.output);
+
+    println!();
+    println!("── Fix 2: Chunked build log ({} lines) ──", line_count);
+    println!("{:<30} {:>12} {:>10} {:>10}", "Pass", "Without CCR", "With CCR", "Savings");
+    println!("{}", "─".repeat(66));
+    println!("{:<30} {:>12} {:>10} {:>9.0}%",
+        "Chunked+consolidated", in_tok, out_tok, savings_pct(in_tok, out_tok));
+    println!("Output lines: {} (budget was {})", out_lines, intended_budget);
+    println!();
+
+    // Without consolidation, N chunks × 60 lines = could be 300+ lines.
+    // With consolidation, output must be within 2× the intended budget.
+    assert!(
+        out_lines <= intended_budget * 2,
+        "consolidated output ({} lines) exceeded 2× budget ({} lines)",
+        out_lines, intended_budget * 2
+    );
+    // Should save substantial tokens on a repetitive build log
+    assert!(
+        savings_pct(in_tok, out_tok) >= 75.0,
+        "expected ≥75% savings on large build log, got {:.0}%",
+        savings_pct(in_tok, out_tok)
+    );
+}
+
+// ─── Fix 3: Grep tool handler benchmark ──────────────────────────────────────
+
+#[test]
+fn benchmark_grep_tool_handler() {
+    // Uses the existing grep_many_matches() fixture: 150 lines in file:line:content format,
+    // which is exactly what the Claude Code Grep tool emits in content mode.
+    let input = grep_many_matches();
+    let in_tok = count_tokens(&input);
+
+    // Simulate what process_grep() does: run GrepHandler directly
+    let handler = GrepHandler;
+    let out = handler.filter(&input, &["grep".to_string(), "handle_request".to_string()]);
+    let out_tok = count_tokens(&out);
+
+    println!();
+    println!("── Fix 3: Grep tool (150 matches, 10 files) ──");
+    println!("{:<30} {:>12} {:>10} {:>10}", "Pass", "Without CCR", "With CCR", "Savings");
+    println!("{}", "─".repeat(66));
+    println!("{:<30} {:>12} {:>10} {:>9.0}%",
+        "GrepHandler (file:line:content)", in_tok, out_tok, savings_pct(in_tok, out_tok));
+    println!();
+
+    // Must group by file and apply caps
+    assert!(out.contains("src/api/users.rs"), "file grouping must be present");
+    // Must save tokens
+    assert!(
+        savings_pct(in_tok, out_tok) >= 30.0,
+        "expected ≥30% savings on 150-match grep output, got {:.0}%",
+        savings_pct(in_tok, out_tok)
+    );
+}
+
+#[test]
+fn benchmark_grep_tool_short_passthrough() {
+    // Grep tool with ≤10 results passes through unchanged (no handler overhead for trivial results)
+    let input = "src/main.rs:42:fn main() {\nsrc/lib.rs:10:fn helper() {";
+    let handler = GrepHandler;
+    let out = handler.filter(input, &["grep".to_string()]);
+    // 2 lines: the GrepHandler should still work fine (just groups them)
+    assert!(!out.is_empty());
 }

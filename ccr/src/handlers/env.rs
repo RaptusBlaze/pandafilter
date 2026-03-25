@@ -38,6 +38,29 @@ enum Category {
     Other,
 }
 
+/// Collapse a colon-separated PATH value into a compact summary.
+/// Values with ≤4 entries are returned as-is (short enough already).
+/// Longer values become "[N entries — a, b, c, ...]" using basenames of the
+/// first 5 entries so the reader can tell what's on the path at a glance.
+fn summarize_path_value(val: &str) -> String {
+    let entries: Vec<&str> = val.split(':').filter(|s| !s.is_empty()).collect();
+    if entries.len() <= 4 {
+        return val.to_string();
+    }
+    const PREVIEW: usize = 5;
+    let names: Vec<&str> = entries
+        .iter()
+        .take(PREVIEW)
+        .map(|e| e.rsplit('/').next().unwrap_or(e))
+        .collect();
+    let rest = if entries.len() > PREVIEW {
+        format!(", +{} more", entries.len() - PREVIEW)
+    } else {
+        String::new()
+    };
+    format!("[{} entries — {}{}]", entries.len(), names.join(", "), rest)
+}
+
 fn is_sensitive(key: &str) -> bool {
     let k = key.to_uppercase();
     SENSITIVE_PATTERNS.iter().any(|pat| k.contains(pat))
@@ -97,6 +120,19 @@ impl Handler for EnvHandler {
         let mut cloud_vars: Vec<(&str, &str)> = Vec::new();
         let mut tools_vars: Vec<(&str, &str)> = Vec::new();
         let mut other_vars: Vec<(&str, &str)> = Vec::new();
+
+        // Pre-summarize PATH-category values to avoid long colon-separated strings.
+        let vars: Vec<(String, String, Category)> = vars
+            .into_iter()
+            .map(|(k, v, cat)| {
+                let v = if cat == Category::Path {
+                    summarize_path_value(&v)
+                } else {
+                    v
+                };
+                (k, v, cat)
+            })
+            .collect();
 
         for (k, v, cat) in &vars {
             match cat {
@@ -175,8 +211,35 @@ mod tests {
         let path_pos = result.find("[PATH]").expect("should have PATH section");
         let tools_pos = result.find("[Tools]").expect("should have Tools section");
         assert!(path_pos < tools_pos, "PATH section should come before Tools section");
-        assert!(result.contains("PATH=/usr/bin:/usr/local/bin"));
+        // Short paths (≤4 entries) are shown verbatim; GOPATH has 1 entry → verbatim
         assert!(result.contains("GOPATH=/home/user/go"));
+        // PATH has exactly 2 entries → shown verbatim (≤4 threshold)
+        assert!(result.contains("PATH=/usr/bin:/usr/local/bin"));
+    }
+
+    #[test]
+    fn path_value_long_is_summarized() {
+        // 7 entries → should be summarized
+        let long_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/homebrew/bin";
+        let input = format!("PATH={}", long_path);
+        let result = filter(&input);
+        assert!(
+            result.contains("[7 entries"),
+            "long PATH should be summarized, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("/usr/local/sbin:/usr/local/bin"),
+            "full colon-separated PATH should not appear when summarized"
+        );
+    }
+
+    #[test]
+    fn path_value_short_is_verbatim() {
+        let input = "PATH=/usr/bin:/usr/local/bin";
+        let result = filter(&input);
+        // 2 entries → verbatim
+        assert!(result.contains("PATH=/usr/bin:/usr/local/bin"));
     }
 
     #[test]

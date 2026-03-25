@@ -1,5 +1,5 @@
 [global]
-summarize_threshold_lines = 200
+summarize_threshold_lines = 50
 head_lines = 30
 tail_lines = 30
 strip_ansi = true

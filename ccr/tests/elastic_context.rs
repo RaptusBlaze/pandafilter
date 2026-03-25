@@ -71,12 +71,12 @@ fn with_pressure_zero_is_identity() {
 #[test]
 fn with_pressure_one_tightens_threshold() {
     let config = CcrConfig::default();
-    let original = config.global.summarize_threshold_lines; // 200
+    let original = config.global.summarize_threshold_lines; // 50
     let adjusted = config.with_pressure(1.0);
     assert!(
-        adjusted.global.summarize_threshold_lines < original / 2,
-        "threshold should be less than half at p=1.0, got {}",
-        adjusted.global.summarize_threshold_lines
+        adjusted.global.summarize_threshold_lines < original,
+        "threshold should be less than original at p=1.0, got {} (original {})",
+        adjusted.global.summarize_threshold_lines, original
     );
     assert!(
         adjusted.global.summarize_threshold_lines >= 30,
@@ -131,31 +131,38 @@ fn with_pressure_respects_minimum_budget() {
 fn pipeline_fires_bert_sooner_under_high_pressure() {
     use ccr_core::pipeline::Pipeline;
 
-    // 60 lines — below normal threshold (200) but above critical threshold (~50)
-    let input: String = (0..60)
-        .map(|i| format!("log line number {} with some extra words to pad it", i))
-        .collect::<Vec<_>>()
-        .join("\n");
+    // 43 lines: 42 repetitive noise lines + 1 error.
+    // 43 < 50 (default threshold) → no BERT at normal pressure.
+    // 43 > 30 (pressure=1.0 threshold) → BERT fires under max pressure and
+    // collapses the noise, keeping only the distinctive error line.
+    let mut lines: Vec<String> = (0..42)
+        .map(|i| format!("info: building module_{:02} ... done", i))
+        .collect();
+    lines.push("error: failed to compile module_07 — type mismatch in impl block".to_string());
+    let input = lines.join("\n");
 
-    // Under no pressure: 60 lines < 200 threshold → no BERT → all lines kept
+    // Under no pressure: 43 lines < 50 threshold → no BERT → all lines kept
     let config_normal = CcrConfig::default();
     let result_normal = Pipeline::new(config_normal)
         .process(&input, None, None, None)
         .unwrap();
     assert!(
-        result_normal.output.lines().count() >= 50,
-        "no pressure should not summarize 60 lines, got {}",
+        result_normal.output.lines().count() >= 38,
+        "no pressure should not summarize 43 lines (threshold=50), got {}",
         result_normal.output.lines().count()
     );
 
-    // Under max pressure: threshold shrinks to ~50 → BERT fires → fewer lines
+    // Under max pressure: threshold shrinks to 30 → BERT fires → noise collapsed
     let config_pressure = CcrConfig::default().with_pressure(1.0);
     let result_pressure = Pipeline::new(config_pressure)
         .process(&input, None, None, None)
         .unwrap();
     assert!(
         result_pressure.output.lines().count() < result_normal.output.lines().count(),
-        "high pressure should produce fewer lines than no pressure"
+        "high pressure should produce fewer lines than no pressure \
+         (pressure={} normal={})",
+        result_pressure.output.lines().count(),
+        result_normal.output.lines().count()
     );
 }
 

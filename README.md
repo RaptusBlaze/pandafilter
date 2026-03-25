@@ -10,41 +10,45 @@ Numbers from `ccr/tests/handler_benchmarks.rs` — each handler fed a realistic 
 
 | Operation | Without CCR | With CCR | Savings |
 |-----------|------------:|---------:|:-------:|
-| `cargo build` | 1,923 | 93 | **−95%** |
-| `cargo test` | 2,782 | 174 | **−94%** |
 | `pip install` | 1,787 | 9 | **−99%** |
 | `playwright test` | 1,367 | 19 | **−99%** |
+| `gradle build` | 803 | 17 | **−98%** |
 | `go test` | 4,507 | 148 | **−97%** |
 | `pytest` | 3,818 | 162 | **−96%** |
 | `terraform plan` | 3,926 | 163 | **−96%** |
 | `npm install` | 648 | 25 | **−96%** |
+| `cargo build` | 1,923 | 93 | **−95%** |
+| `cargo test` | 2,782 | 174 | **−94%** |
+| `next build` | 549 | 53 | **−90%** |
 | `cargo clippy` | 786 | 93 | **−88%** |
 | `make` | 545 | 72 | **−87%** |
-| `vitest` | 625 | 103 | **−84%** |
+| `git push` | 173 | 24 | **−86%** |
 | `ls` | 691 | 102 | **−85%** |
-| `next build` | 549 | 53 | **−90%** |
-| `git log` | 1,573 | 353 | **−78%** |
-| `grep` | 2,925 | 691 | **−76%** |
-| `docker ps` | 1,057 | 266 | **−75%** |
-| `git status` | 650 | 184 | **−72%** |
-| `kubectl get pods` | 2,306 | 689 | **−70%** |
+| `vitest` | 625 | 103 | **−84%** |
+| `git log` | 1,573 | 353 | −78% |
+| `grep` | 2,925 | 691 | −76% |
+| `helm install` | 224 | 54 | −76% |
+| `docker ps` | 1,057 | 266 | −75% |
+| `git status` | 650 | 184 | −72% |
+| `kubectl get pods` | 2,306 | 689 | −70% |
 | `jest` | 330 | 114 | −65% |
-| `env` | 1,155 | 419 | −64% |
+| `env` | 1,155 | 399 | −65% |
 | `brew install` | 368 | 148 | −60% |
 | `gh pr list` | 774 | 321 | −59% |
+| `git diff` | 6,370 | 2,654 | −58% |
 | `mvn install` | 1,768 | 953 | −46% |
-| `git push` | 173 | 106 | −39% |
 | `golangci-lint` | 853 | 596 | −30% |
-| `tsc` | 666 | 509 | −24% |
-| `git diff` | 1,757 | 1,368 | −22% |
-| `gradle build` | 803 | 692 | −14% |
-| `helm install` | 224 | 54 | −76% |
-| **Total** | **41,626** | **8,969** | **−78%** |
+| `tsc` | 666 | 470 | −29% |
+| `eslint` | 290 | 290 | 0% |
+| **Total** | **46,239** | **9,439** | **−80%** |
 
 **Notes:**
 - For `cargo build` / `cargo test`: "without CCR" is standard human-readable output; CCR injects `--message-format json` to extract structured errors.
 - For `git status` / `git log`: "without CCR" is the full verbose format; CCR injects `--porcelain` / `--oneline` before running.
-- `tsc`, `git diff`, and `gradle build` compress less — errors are already compact, diffs preserve changes. Savings scale with output size.
+- `git diff` fixture is a 10-file refactoring diff; context lines trimmed to 2 per side, total capped at 200.
+- `gradle build` collapses UP-TO-DATE task lines into a single count — savings scale with subproject count.
+- `eslint` fixture is 12 compact errors; savings increase significantly on large codebases where rule deduplication kicks in.
+- `tsc` groups errors by file and truncates verbose type messages; savings scale with error count.
 - Run `ccr gain` after any session to see your real numbers.
 
 ---
@@ -239,7 +243,7 @@ ccr proxy git status  # run raw (no filtering), record analytics baseline
 
 | Handler | Keys | Savings | Key behavior |
 |---------|------|---------|-------------|
-| **tsc** | `tsc` | ~90% | Groups errors by file. `Build OK` on clean. |
+| **tsc** | `tsc` | ~50% | Groups errors by file; deduplicates repeated TS codes; truncates verbose type messages. `Build OK` on clean. |
 | **vitest** | `vitest` | ~88% | FAIL blocks + summary; drops `✓` lines. |
 | **jest** | `jest`, `bun`, `deno`, `nx` | ~88% | `●` failure blocks + summary; drops `PASS` lines. |
 | **eslint** | `eslint` | ~85% | Errors grouped by file, caps at 20 + `[+N more]`. |
@@ -268,7 +272,7 @@ ccr proxy git status  # run raw (no filtering), record analytics baseline
 | **golangci-lint** | `golangci-lint`, `golangci_lint` | ~88% | Diagnostics grouped by file; INFO/DEBUG runner noise dropped. |
 | **prisma** | `prisma` | ~85% | `generate`: client summary. `migrate`: migration names. `db push`: sync status. |
 | **mvn** | `mvn`, `mvnw`, `./mvnw` | ~80% | Drops `[INFO]` noise; keeps errors + reactor summary. |
-| **gradle** | `gradle`, `gradlew`, `./gradlew` | ~80% | FAILED tasks, Kotlin errors, failure blocks. |
+| **gradle** | `gradle`, `gradlew`, `./gradlew` | ~98% | UP-TO-DATE tasks collapsed to `[N tasks UP-TO-DATE]`. FAILED tasks, Kotlin errors, failure blocks kept. |
 | **helm** | `helm`, `helm3` | ~85% | `list`: compact table. `status`/`diff`/`template`: structured. |
 
 **System / Utility**
@@ -276,7 +280,7 @@ ccr proxy git status  # run raw (no filtering), record analytics baseline
 | Handler | Keys | Savings | Key behavior |
 |---------|------|---------|-------------|
 | **cargo** | `cargo` | ~87% | `build`/`check`/`clippy`: JSON format, errors + warning count. `test`: failures + summary. Repeated Clippy rules grouped `[rule ×N]`. |
-| **git** | `git` | ~80% | `status`: Staged/Modified/Untracked counts. `log` injects `--oneline`, caps 20. `diff`: hunk limiting (max 5 + `[+N more hunks]`). Push/pull success short-circuits. |
+| **git** | `git` | ~80% | `status`: Staged/Modified/Untracked counts. `log` injects `--oneline`, caps 20. `diff`: 2 context lines per side, 200-line total cap, per-file `[+N -M]` tally. Push/pull success short-circuits. |
 | **curl** | `curl` | ~96% | JSON → type schema. Non-JSON: cap 30 lines. |
 | **docker** | `docker`, `docker-compose` | ~85% | `logs`: ANSI strip + timestamp normalization before BERT. `ps`/`images`: compact table. |
 | **npm/yarn** | `npm`, `yarn` | ~85% | `install`: package count. Strips boilerplate (`> project@...`, `npm WARN`, spinners). |
@@ -288,7 +292,7 @@ ccr proxy git status  # run raw (no filtering), record analytics baseline
 | **tree** | `tree` | ~70% | Injects `-I "node_modules\|.git\|target\|..."` unless user set `-I`. |
 | **diff** | `diff` | ~75% | `+`/`-`/`@@` + 2 context lines per hunk. Max 5 hunks + `[+N more hunks]`. |
 | **jq** | `jq` | ~80% | ≤20 lines pass through. Array: schema of first element + `[N items]`. |
-| **env** | `env`, `printenv` | ~70% | Categorized sections: [PATH]/[Language]/[Cloud]/[Tools]/[Other]. Sensitive values redacted. |
+| **env** | `env`, `printenv` | ~65% | Categorized sections: [PATH]/[Language]/[Cloud]/[Tools]/[Other]. Long PATH values summarized as `[N entries — bin1, bin2, …]`. Sensitive values redacted. |
 | **ls** | `ls` | ~80% | Drops noise dirs (node_modules, .git, target, …). Top-3 extension summary. |
 | **cat** | `cat` | ~70% | ≤100 lines: pass through. 101–500: head/tail. >500: BERT. |
 | **grep / rg** | `grep`, `rg` | ~80% | Compact paths (>50 chars), per-file 25-match cap. |
@@ -365,7 +369,7 @@ Config is loaded from: `./ccr.toml` → `~/.config/ccr/config.toml` → embedded
 
 ```toml
 [global]
-summarize_threshold_lines = 200  # trigger BERT summarization
+summarize_threshold_lines = 50   # trigger BERT summarization
 head_lines = 30                  # head+tail fallback budget
 tail_lines = 30
 strip_ansi = true
@@ -449,11 +453,12 @@ CCR tracks state across turns within a session (identified by `CCR_SESSION_ID=$P
 
 ### PostToolUse
 
-Dispatches by `tool_name` — Bash, Read, or Glob:
+Dispatches by `tool_name` — Bash, Read, Glob, or Grep:
 
 - **Bash** — min-token gate → noise pre-filter → global regex rules → EC pressure → IX intent query → BERT pipeline → ZI blocks → delta compression → sentence dedup → session cache → analytics
 - **Read** — files < 50 lines pass through; larger files go through BERT pipeline with intent query; session dedup by file path
 - **Glob** — results ≤ 20 pass through; larger lists grouped by directory (max 60), session dedup by path-list hash
+- **Grep** — results ≤ 10 lines pass through; larger result sets routed through GrepHandler (compact paths, per-file 25-match cap)
 
 Never fails — returns nothing on error so Claude Code always sees a result.
 

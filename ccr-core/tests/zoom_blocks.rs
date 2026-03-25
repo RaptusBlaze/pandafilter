@@ -129,13 +129,15 @@ fn pipeline_result_carries_zoom_blocks_when_enabled() {
 
     zoom::enable();
 
-    // Create a config with a collapse pattern for "cargo"
+    // Create a config with a collapse pattern for "mytool".
+    // Use "VERBOSE:" prefix instead of "Compiling" to avoid the global_rules
+    // build-progress strip that would remove lines before the pattern fires.
     let mut commands = HashMap::new();
     commands.insert(
-        "cargo".to_string(),
+        "mytool".to_string(),
         CommandConfig {
             patterns: vec![FilterPattern {
-                regex: r"^\s+Compiling \S+ v[\d.]+".to_string(),
+                regex: r"^VERBOSE: loading ".to_string(),
                 action: FilterAction::Simple(SimpleAction::Collapse),
             }],
         },
@@ -144,12 +146,12 @@ fn pipeline_result_carries_zoom_blocks_when_enabled() {
     let pipeline = Pipeline::new(config);
 
     let input = (0..5)
-        .map(|i| format!("   Compiling crate{} v1.0", i))
+        .map(|i| format!("VERBOSE: loading module{}", i))
         .chain(std::iter::once("error[E0001]: something broke".to_string()))
         .collect::<Vec<_>>()
         .join("\n");
 
-    let result = pipeline.process(&input, Some("cargo"), None, None).unwrap();
+    let result = pipeline.process(&input, Some("mytool"), None, None).unwrap();
 
     assert!(
         !result.zoom_blocks.is_empty(),

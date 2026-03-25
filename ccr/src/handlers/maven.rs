@@ -122,6 +122,8 @@ impl Handler for GradleHandler {
         let mut out: Vec<String> = Vec::new();
         let mut in_failure = false;
         let mut failure_lines = 0usize;
+        // Count UP-TO-DATE tasks instead of emitting each line individually.
+        let mut up_to_date_count: usize = 0;
 
         let build_success = lines.iter().any(|l| l.contains("BUILD SUCCESSFUL"));
         let build_failed = lines.iter().any(|l| l.contains("BUILD FAILED"));
@@ -134,8 +136,10 @@ impl Handler for GradleHandler {
 
             // Task headers: "> Task :foo:bar"
             if t.starts_with("> Task") {
-                if t.contains("FAILED") || t.contains("UP-TO-DATE") {
+                if t.contains("FAILED") {
                     out.push(line.to_string());
+                } else if t.contains("UP-TO-DATE") {
+                    up_to_date_count += 1;
                 }
                 continue;
             }
@@ -179,6 +183,11 @@ impl Handler for GradleHandler {
             if t.starts_with("BUILD") || t.contains(" tests were") || t.contains("passed") {
                 out.push(line.to_string());
             }
+        }
+
+        // Emit collapsed UP-TO-DATE summary if any were seen
+        if up_to_date_count > 0 {
+            out.push(format!("[{} tasks UP-TO-DATE]", up_to_date_count));
         }
 
         if out.is_empty() {

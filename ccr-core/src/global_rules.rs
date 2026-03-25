@@ -108,7 +108,8 @@ pub fn apply(input: &str) -> String {
         }
 
         // Cargo/rustc build progress (Compiling/Checking/Fresh — never informative)
-        if RE_BUILD_PROGRESS.is_match(t) {
+        // Match against untrimmed `line` because the regex anchors on leading whitespace.
+        if RE_BUILD_PROGRESS.is_match(line) {
             continue;
         }
 

@@ -4,8 +4,9 @@ use crate::config::CcrConfig;
 use crate::global_rules;
 use crate::patterns::PatternFilter;
 use crate::summarizer::{
-    entropy_adjusted_budget, noise_scores, summarize_against_centroid, summarize_with_anchoring,
-    summarize_with_clustering, summarize_with_intent, summarize_with_query,
+    entropy_adjusted_budget, noise_filter_with_embeddings, summarize_against_centroid,
+    summarize_with_anchoring_preembedded, summarize_with_clustering_preembedded,
+    summarize_with_intent, summarize_with_query,
 };
 use crate::tokens::count_tokens;
 use crate::whitespace::normalize;
@@ -15,6 +16,9 @@ use crate::whitespace::normalize;
 const CHUNK_THRESHOLD_LINES: usize = 2000;
 /// Lines per chunk when chunked processing is active.
 const CHUNK_SIZE_LINES: usize = 500;
+/// If chunk summaries together exceed the intended budget by this factor, run a
+/// consolidation pass to bring the total back toward the intended budget.
+const CHUNK_CONSOLIDATION_FACTOR: f32 = 1.5;
 
 pub struct PipelineResult {
     pub output: String,
@@ -76,18 +80,18 @@ impl Pipeline {
         if text.lines().count() > self.config.global.summarize_threshold_lines {
             let max_budget = self.config.global.head_lines + self.config.global.tail_lines;
 
-            // 4a. Pre-filter noise (progress/download/compiling lines)
+            // 4a. Pre-filter noise and retain BERT embeddings for re-use in step 4b.
+            // noise_filter_with_embeddings embeds non-empty lines once and returns
+            // (surviving_lines, their_embeddings). Passing these embeddings to
+            // summarize_single avoids a second model.embed() call on the same text.
+            let mut preembedded: Option<Vec<Vec<f32>>> = None;
             {
                 let lines: Vec<&str> = text.lines().collect();
-                if let Ok(scores) = noise_scores(&lines) {
-                    let filtered: Vec<&str> = lines
-                        .iter()
-                        .zip(scores.iter())
-                        .filter_map(|(line, &score)| if score >= -0.05 { Some(*line) } else { None })
-                        .collect();
-                    if filtered.len() < lines.len() {
-                        text = filtered.join("\n");
+                if let Ok((surviving, embeddings)) = noise_filter_with_embeddings(&lines) {
+                    if surviving.len() < lines.len() {
+                        text = surviving.join("\n");
                     }
+                    preembedded = Some(embeddings);
                 }
             }
 
@@ -98,11 +102,12 @@ impl Pipeline {
 
                 // 4c. Context-aware summarizer selection.
                 // For very large inputs, split into chunks to reduce peak memory.
+                // Chunked path does not reuse embeddings (each chunk is independent).
                 let line_count = text.lines().count();
                 text = if line_count > CHUNK_THRESHOLD_LINES {
                     self.summarize_chunked(&text, budget, command_hint, query, historical_centroid)
                 } else {
-                    self.summarize_single(&text, budget, command_hint, query, historical_centroid)
+                    self.summarize_single(&text, budget, command_hint, query, historical_centroid, preembedded)
                 };
             }
         }
@@ -115,6 +120,10 @@ impl Pipeline {
 
     /// Summarize a single block of text using the context-aware strategy.
     /// Priority: centroid (historical) > query+command > query > command > anchoring.
+    ///
+    /// `preembedded` — when `Some`, these BERT embeddings (one per non-empty line in
+    /// `text`, in order) were computed by the noise-filtering pass and can be reused
+    /// directly by the clustering/anchoring paths, avoiding a second model.embed() call.
     fn summarize_single(
         &self,
         text: &str,
@@ -122,6 +131,7 @@ impl Pipeline {
         command_hint: Option<&str>,
         query: Option<&str>,
         historical_centroid: Option<&[f32]>,
+        preembedded: Option<Vec<Vec<f32>>>,
     ) -> String {
         match (query, command_hint, historical_centroid) {
             // query always wins when present — user intent overrides history
@@ -135,11 +145,12 @@ impl Pipeline {
             (None, Some(_), Some(centroid)) => {
                 summarize_against_centroid(text, budget, centroid).output
             }
+            // clustering and anchoring can reuse pre-computed embeddings
             (_, Some(_), _) => {
-                summarize_with_clustering(text, budget).output
+                summarize_with_clustering_preembedded(text, budget, preembedded).output
             }
             _ => {
-                summarize_with_anchoring(text, budget, 1).output
+                summarize_with_anchoring_preembedded(text, budget, 1, preembedded).output
             }
         }
     }
@@ -147,10 +158,14 @@ impl Pipeline {
     /// Summarize a very large input by splitting into chunks of `CHUNK_SIZE_LINES`
     /// lines, summarizing each independently, then concatenating the results.
     /// Reduces peak memory compared to processing all lines at once.
+    ///
+    /// After chunking, if the combined summaries exceed the intended budget by
+    /// `CHUNK_CONSOLIDATION_FACTOR`, a single consolidation pass is run over the
+    /// merged summaries to bring the total back toward `intended_budget`.
     fn summarize_chunked(
         &self,
         text: &str,
-        budget_per_chunk: usize,
+        intended_budget: usize,
         command_hint: Option<&str>,
         query: Option<&str>,
         historical_centroid: Option<&[f32]>,
@@ -163,7 +178,8 @@ impl Pipeline {
             if chunk_text.trim().is_empty() {
                 continue;
             }
-            let summary = self.summarize_single(&chunk_text, budget_per_chunk, command_hint, query, historical_centroid);
+            // Chunked path: no pre-computed embeddings (each chunk is independent)
+            let summary = self.summarize_single(&chunk_text, intended_budget, command_hint, query, historical_centroid, None);
             if !summary.trim().is_empty() {
                 parts.push(summary);
             }
@@ -173,8 +189,21 @@ impl Pipeline {
             return parts.into_iter().next().unwrap_or_default();
         }
 
-        // Join chunk summaries with a separator so the reader knows output was chunked
-        parts.join(&format!("\n[--- {} more lines ---]\n", CHUNK_SIZE_LINES))
+        let combined = parts.join("\n");
+
+        // Consolidation pass: if chunk summaries together are too large, compress again.
+        let total_lines = combined.lines().count();
+        if total_lines as f32 > intended_budget as f32 * CHUNK_CONSOLIDATION_FACTOR {
+            // Strip chunk separator markers before re-embedding so they don't skew BERT scores.
+            let stripped: String = combined
+                .lines()
+                .filter(|l| !(l.starts_with("[---") && l.ends_with("more lines ---]")))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return self.summarize_single(&stripped, intended_budget, command_hint, query, historical_centroid, None);
+        }
+
+        combined
     }
 }
 
@@ -200,19 +229,19 @@ mod tests {
     fn command_hint_selects_correct_patterns() {
         let mut commands = HashMap::new();
         commands.insert(
-            "cargo".to_string(),
+            "mytool".to_string(),
             CommandConfig {
                 patterns: vec![FilterPattern {
-                    regex: "^   Compiling \\S+ v[\\d.]+".to_string(),
+                    regex: "^VERBOSE: ".to_string(),
                     action: FilterAction::Simple(SimpleAction::Collapse),
                 }],
             },
         );
         let config = CcrConfig { commands, ..CcrConfig::default() };
         let pipeline = Pipeline::new(config);
-        let input = "   Compiling foo v1.0\n   Compiling bar v1.0\nerror[E0001]: bad";
-        let result = pipeline.process(input, Some("cargo"), None, None).unwrap();
-        assert!(result.output.contains("collapsed") || result.output.contains("Compiling"));
+        let input = "VERBOSE: loading module foo\nVERBOSE: loading module bar\nerror[E0001]: bad";
+        let result = pipeline.process(input, Some("mytool"), None, None).unwrap();
+        assert!(result.output.contains("collapsed") || result.output.contains("VERBOSE"));
         assert!(result.output.contains("error[E0001]"));
     }
 
@@ -220,19 +249,20 @@ mod tests {
     fn no_command_hint_uses_global_rules_only() {
         let mut commands = HashMap::new();
         commands.insert(
-            "cargo".to_string(),
+            "mytool".to_string(),
             CommandConfig {
                 patterns: vec![FilterPattern {
-                    regex: "^   Compiling \\S+ v[\\d.]+".to_string(),
+                    regex: "^VERBOSE: ".to_string(),
                     action: FilterAction::Simple(SimpleAction::Remove),
                 }],
             },
         );
         let config = CcrConfig { commands, ..CcrConfig::default() };
         let pipeline = Pipeline::new(config);
-        let input = "   Compiling foo v1.0\n   Compiling bar v1.0";
+        // Without a matching command hint, command-specific Remove pattern does NOT fire
+        let input = "VERBOSE: loading module foo\nVERBOSE: loading module bar";
         let result = pipeline.process(input, None, None, None).unwrap();
-        assert!(result.output.contains("Compiling"));
+        assert!(result.output.contains("VERBOSE"));
     }
 
     #[test]

@@ -477,6 +477,18 @@ pub fn summarize_with_anchoring(
     budget_lines: usize,
     anchor_neighbors: usize,
 ) -> SummarizeResult {
+    summarize_with_anchoring_preembedded(text, budget_lines, anchor_neighbors, None)
+}
+
+/// Like [`summarize_with_anchoring`] but reuses `embeddings` pre-computed by a prior
+/// noise-scoring pass (one entry per non-empty line in `text`, in order).
+/// If the length doesn't match, falls back to re-embedding.
+pub fn summarize_with_anchoring_preembedded(
+    text: &str,
+    budget_lines: usize,
+    anchor_neighbors: usize,
+    precomputed: Option<Vec<Vec<f32>>>,
+) -> SummarizeResult {
     let lines: Vec<&str> = text.lines().collect();
     let lines_in = lines.len();
 
@@ -484,7 +496,7 @@ pub fn summarize_with_anchoring(
         return SummarizeResult { output: String::new(), lines_in: 0, lines_out: 0, omitted: 0 };
     }
 
-    let output = match summarize_semantic_anchored(&lines, budget_lines, anchor_neighbors) {
+    let output = match summarize_semantic_anchored(&lines, budget_lines, anchor_neighbors, precomputed) {
         Ok(s) => s,
         Err(_) => summarize_headtail(&lines, budget_lines),
     };
@@ -498,6 +510,7 @@ fn summarize_semantic_anchored(
     lines: &[&str],
     budget: usize,
     anchor_neighbors: usize,
+    precomputed: Option<Vec<Vec<f32>>>,
 ) -> anyhow::Result<String> {
     let total = lines.len();
     let budget = budget.min(total);
@@ -513,9 +526,15 @@ fn summarize_semantic_anchored(
         return Ok(lines.join("\n"));
     }
 
-    let model = get_model()?;
-    let texts: Vec<&str> = indexed_lines.iter().map(|(_, l)| *l).collect();
-    let embeddings = model.embed(texts, None)?;
+    let n = indexed_lines.len();
+    let embeddings: Vec<Vec<f32>> =
+        if let Some(pre) = precomputed.filter(|p| p.len() == n) {
+            pre
+        } else {
+            let model = get_model()?;
+            let texts: Vec<&str> = indexed_lines.iter().map(|(_, l)| *l).collect();
+            model.embed(texts, None)?
+        };
 
     let centroid = compute_centroid(&embeddings);
 
@@ -841,6 +860,17 @@ const CLUSTER_SIM_THRESHOLD: f32 = 0.85;
 /// keeps one representative per cluster plus a `[N similar]` marker.
 /// Critical lines (errors/warnings) are always represented in the output.
 pub fn summarize_with_clustering(text: &str, budget_lines: usize) -> SummarizeResult {
+    summarize_with_clustering_preembedded(text, budget_lines, None)
+}
+
+/// Like [`summarize_with_clustering`] but reuses `embeddings` pre-computed by a prior
+/// noise-scoring pass (one entry per non-empty line in `text`, in order).
+/// If the length doesn't match, falls back to re-embedding.
+pub fn summarize_with_clustering_preembedded(
+    text: &str,
+    budget_lines: usize,
+    precomputed: Option<Vec<Vec<f32>>>,
+) -> SummarizeResult {
     let lines: Vec<&str> = text.lines().collect();
     let lines_in = lines.len();
 
@@ -848,7 +878,7 @@ pub fn summarize_with_clustering(text: &str, budget_lines: usize) -> SummarizeRe
         return SummarizeResult { output: String::new(), lines_in: 0, lines_out: 0, omitted: 0 };
     }
 
-    let output = match do_cluster_summarize(&lines, budget_lines) {
+    let output = match do_cluster_summarize(&lines, budget_lines, precomputed) {
         Ok(s) => s,
         Err(_) => summarize_headtail(&lines, budget_lines),
     };
@@ -858,7 +888,11 @@ pub fn summarize_with_clustering(text: &str, budget_lines: usize) -> SummarizeRe
     SummarizeResult { output, lines_in, lines_out, omitted }
 }
 
-fn do_cluster_summarize(lines: &[&str], budget: usize) -> anyhow::Result<String> {
+fn do_cluster_summarize(
+    lines: &[&str],
+    budget: usize,
+    precomputed: Option<Vec<Vec<f32>>>,
+) -> anyhow::Result<String> {
     let indexed: Vec<(usize, &str)> = lines
         .iter()
         .enumerate()
@@ -870,10 +904,15 @@ fn do_cluster_summarize(lines: &[&str], budget: usize) -> anyhow::Result<String>
         return Ok(lines.join("\n"));
     }
 
-    let model = get_model()?;
-    let texts: Vec<&str> = indexed.iter().map(|(_, l)| *l).collect();
-    let embeddings = model.embed(texts, None)?;
     let n = indexed.len();
+    let embeddings: Vec<Vec<f32>> =
+        if let Some(pre) = precomputed.filter(|p| p.len() == n) {
+            pre
+        } else {
+            let model = get_model()?;
+            let texts: Vec<&str> = indexed.iter().map(|(_, l)| *l).collect();
+            model.embed(texts, None)?
+        };
 
     // ── Greedy clustering ────────────────────────────────────────────────────
     // Each line joins the nearest cluster within threshold, or starts a new one.
@@ -1134,6 +1173,75 @@ pub fn noise_scores(lines: &[&str]) -> anyhow::Result<Vec<f32>> {
         .collect();
 
     Ok(scores)
+}
+
+/// Combined noise filtering that returns the surviving text AND the BERT embeddings
+/// for surviving non-empty lines.
+///
+/// Embeds only non-empty lines (consistent with the clustering/anchoring summarizers),
+/// applies the same -0.05 noise threshold as [`noise_scores`], and returns:
+/// - The filtered text (same as what the pipeline would keep after calling `noise_scores`)
+/// - A `Vec<Vec<f32>>` with one embedding per non-empty line in that filtered text, in order
+///
+/// Passing these embeddings to [`summarize_with_clustering_preembedded`] or
+/// [`summarize_with_anchoring_preembedded`] avoids a second full model.embed() call,
+/// roughly halving BERT latency for every summarized output.
+///
+/// Returns `(original_text_as_vec, empty_vec)` if no lines survive filtering or if the
+/// model is unavailable, so the caller always gets a valid result.
+pub fn noise_filter_with_embeddings(
+    lines: &[&str],
+) -> anyhow::Result<(Vec<String>, Vec<Vec<f32>>)> {
+    if lines.is_empty() {
+        return Ok((vec![], vec![]));
+    }
+
+    // Only embed non-empty lines — same filter the summarizers apply
+    let non_empty: Vec<(usize, &str)> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+        .map(|(i, l)| (i, *l))
+        .collect();
+
+    if non_empty.is_empty() {
+        return Ok((lines.iter().map(|s| s.to_string()).collect(), vec![]));
+    }
+
+    let model = get_model()?;
+    let useful_emb = useful_embedding()?;
+    let noise_emb = noise_embedding()?;
+
+    let texts: Vec<&str> = non_empty.iter().map(|(_, l)| *l).collect();
+    let embeddings = model.embed(texts, None)?;
+
+    // Mark noisy lines for removal
+    let mut drop_set: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for (j, &(orig_i, _)) in non_empty.iter().enumerate() {
+        let score = cosine_similarity(&embeddings[j], useful_emb)
+            - cosine_similarity(&embeddings[j], noise_emb);
+        if score < -0.05 {
+            drop_set.insert(orig_i);
+        }
+    }
+
+    // Surviving lines (preserving empty lines that were not scored)
+    let surviving_lines: Vec<String> = lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !drop_set.contains(i))
+        .map(|(_, l)| l.to_string())
+        .collect();
+
+    // Embeddings for surviving non-empty lines only, in order
+    let surviving_embeddings: Vec<Vec<f32>> = non_empty
+        .iter()
+        .zip(embeddings.into_iter())
+        .filter(|((orig_i, _), _)| !drop_set.contains(orig_i))
+        .map(|(_, emb)| emb)
+        .collect();
+
+    Ok((surviving_lines, surviving_embeddings))
 }
 
 // ── Batch embedding (public) ──────────────────────────────────────────────────

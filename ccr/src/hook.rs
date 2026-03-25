@@ -41,6 +41,7 @@ pub fn run() -> Result<()> {
     match hook_input.tool_name.as_str() {
         "Read" => process_read(hook_input),
         "Glob" => process_glob(hook_input),
+        "Grep" => process_grep(hook_input),
         _ => process_bash(hook_input), // Bash and unknown tools
     }
 }
@@ -501,6 +502,52 @@ fn process_glob(hook_input: HookInput) -> Result<()> {
     let hook_output = HookOutput { output: compressed };
     println!("{}", serde_json::to_string(&hook_output)?);
 
+    Ok(())
+}
+
+// ── Grep tool handler ─────────────────────────────────────────────────────────
+
+fn process_grep(hook_input: HookInput) -> Result<()> {
+    let pattern = hook_input
+        .tool_input
+        .get("pattern")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let output_text = if !hook_input.tool_response.output.is_empty() {
+        hook_input.tool_response.output.clone()
+    } else {
+        hook_input.tool_response.stdout.clone()
+    };
+
+    if output_text.is_empty() {
+        return Ok(());
+    }
+
+    // Short results pass through unchanged
+    if output_text.lines().count() <= 10 {
+        return Ok(());
+    }
+
+    use crate::handlers::Handler;
+    let handler = crate::handlers::grep::GrepHandler;
+    let args: Vec<String> = vec!["grep".to_string(), pattern];
+    let filtered = handler.filter(&output_text, &args);
+
+    let input_tokens = ccr_core::tokens::count_tokens(&output_text);
+    let output_tokens = ccr_core::tokens::count_tokens(&filtered);
+    let analytics = ccr_core::analytics::Analytics::new(
+        input_tokens,
+        output_tokens,
+        Some("(grep-tool)".to_string()),
+        None,
+        None,
+    );
+    crate::util::append_analytics(&analytics);
+
+    let hook_output = HookOutput { output: filtered };
+    println!("{}", serde_json::to_string(&hook_output)?);
     Ok(())
 }
 

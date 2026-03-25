@@ -83,7 +83,7 @@ fn default_state_commands() -> Vec<String> {
 impl Default for GlobalConfig {
     fn default() -> Self {
         Self {
-            summarize_threshold_lines: 200,
+            summarize_threshold_lines: 50,
             head_lines: 30,
             tail_lines: 30,
             strip_ansi: true,
