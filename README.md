@@ -96,7 +96,7 @@ After `ccr init`, **this is fully automatic** — no changes to how you use Clau
 
 **What makes CCR different from rule-based proxies:**
 
-- **40 handlers (50+ aliases)** — purpose-built filters for common dev tools (cargo, git, kubectl, gh, terraform, pytest, tsc, …)
+- **46 handlers (60+ aliases)** — purpose-built filters for common dev tools (cargo, git, kubectl, gh, terraform, pytest, tsc, vite, webpack, turbo, biome, …)
 - **Global regex pre-filter** — strips progress bars, spinners, download lines, and decorators before BERT even loads
 - **BERT semantic routing** — unknown commands matched to nearest handler via sentence embeddings, with confidence tiers and margin gating
 - **Intent-aware compression** — uses Claude's last message as the BERT query so output relevant to the current task scores highest
