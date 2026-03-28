@@ -73,6 +73,15 @@ pub fn top_unoptimized(limit: usize) -> Vec<(String, usize)> {
         return vec![];
     }
 
+    // Sort by modification time (newest first) and cap at 20 files so that
+    // `ccr gain` never loads hundreds of MB of old conversation history.
+    jsonl_files.sort_by(|a, b| {
+        let mt_a = a.metadata().and_then(|m| m.modified()).ok();
+        let mt_b = b.metadata().and_then(|m| m.modified()).ok();
+        mt_b.cmp(&mt_a)
+    });
+    jsonl_files.truncate(20);
+
     let mut by_cmd: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for path in &jsonl_files {
         scan_jsonl(path, &mut by_cmd);
@@ -289,16 +298,20 @@ fn collect_jsonl(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
 }
 
 fn scan_jsonl(path: &Path, by_cmd: &mut BTreeMap<String, (usize, usize)>) {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
+    use std::io::{BufRead, BufReader};
+
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
         Err(_) => return,
     };
+    let reader = BufReader::new(file);
 
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) if !l.trim().is_empty() => l,
+            _ => continue,
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
 
