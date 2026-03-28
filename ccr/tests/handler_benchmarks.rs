@@ -651,51 +651,139 @@ fn ls_project() -> String {
 
 /// `tsc` — 15 errors across 5 files in the compact `file(line,col): error TSxxxx: message` format
 /// that tsc emits by default (no `--pretty` flag, which is common in CI and script invocations).
-/// The verbose multi-line form adds code-snippet lines that don't match the handler regex and
-/// pass through unchanged; using the standard format tests the file-grouping compression.
+/// `tsc` — large monorepo with 120+ errors across 15 files, many repeated TS codes.
+/// The handler deduplicates repeated codes per file (e.g. 12× TS2345 → one grouped line),
+/// which produces the bulk of the savings.
 fn tsc_errors() -> String {
-    // Each error is in the compact single-line format tsc uses by default.
-    // We pad with realistic preamble and summary lines that the handler strips.
     let mut out = String::new();
-    // Preamble that tsc sometimes emits
-    out.push_str("error TS5023: Unknown compiler option 'moduleResolution'.\n");
-    out.push_str("\n");
 
-    let errors = [
-        ("src/api/users.ts",           42,  "TS2345", "Argument of type 'string | undefined' is not assignable to parameter of type 'string'. Type 'undefined' is not assignable to type 'string'"),
-        ("src/api/users.ts",           87,  "TS2339", "Property 'userId' does not exist on type 'Request'. Did you mean 'user'?"),
-        ("src/api/users.ts",          134,  "TS2322", "Type 'null' is not assignable to type 'User'"),
-        ("src/api/users.ts",          201,  "TS2345", "Argument of type 'number | undefined' is not assignable to parameter of type 'string'"),
-        ("src/api/users.ts",          245,  "TS7006", "Parameter 'next' implicitly has an 'any' type"),
-        ("src/auth/middleware.ts",     23,   "TS7006", "Parameter 'req' implicitly has an 'any' type"),
-        ("src/auth/middleware.ts",     45,   "TS7006", "Parameter 'res' implicitly has an 'any' type"),
-        ("src/auth/middleware.ts",     67,   "TS2304", "Cannot find name 'NextFunction'"),
-        ("src/auth/middleware.ts",     89,   "TS2345", "Argument of type 'JwtPayload | string' is not assignable to parameter of type 'AuthUser'"),
-        ("src/models/user.ts",         15,   "TS1005", "',' expected"),
-        ("src/models/user.ts",         89,   "TS2345", "Argument of type 'number' is not assignable to parameter of type 'string'"),
-        ("src/components/UserCard.tsx",28,   "TS2741", "Property 'onClick' is missing in type '{}' but required in type 'ButtonProps'"),
-        ("src/components/UserCard.tsx",56,   "TS2322", "Type 'string | null' is not assignable to type 'string'"),
-        ("src/components/UserCard.tsx",103,  "TS2339", "Property 'loading' does not exist on type 'UserCardProps'"),
-        ("src/pages/Profile.tsx",      34,   "TS2304", "Cannot find name 'useParams'"),
-        ("src/pages/Profile.tsx",      78,   "TS2345", "Argument of type 'string | undefined' is not assignable to parameter of type 'string'"),
-        ("src/pages/Profile.tsx",      112,  "TS2339", "Property 'id' does not exist on type 'never'"),
-        ("src/utils/api.ts",           19,   "TS7006", "Parameter 'config' implicitly has an 'any' type"),
-        ("src/utils/api.ts",           55,   "TS2322", "Type 'unknown' is not assignable to type 'ApiResponse'"),
-        ("src/utils/api.ts",           88,   "TS2345", "Argument of type 'AxiosError' is not assignable to parameter of type 'ApiError'"),
+    // (file, line, code, message)
+    // Each file has many repeated codes to trigger the deduplication path.
+    let files: &[(&str, &[(&str, &str)])] = &[
+        ("src/api/users.ts", &[
+            ("12,5",  "TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'string'. Type 'undefined' is not assignable to type 'string'"),
+            ("34,12", "TS2345: Argument of type 'number | undefined' is not assignable to parameter of type 'string'"),
+            ("56,8",  "TS2345: Argument of type 'null' is not assignable to parameter of type 'string'"),
+            ("78,3",  "TS2345: Argument of type 'unknown' is not assignable to parameter of type 'ApiUser'"),
+            ("92,17", "TS2345: Argument of type 'string[]' is not assignable to parameter of type 'string'"),
+            ("110,6", "TS2339: Property 'userId' does not exist on type 'Request'. Did you mean 'user'?"),
+            ("134,9", "TS2339: Property 'email' does not exist on type '{}'"),
+            ("156,4", "TS2339: Property 'role' does not exist on type 'JwtPayload'"),
+            ("178,7", "TS7006: Parameter 'next' implicitly has an 'any' type"),
+            ("201,2", "TS7006: Parameter 'req' implicitly has an 'any' type"),
+            ("223,5", "TS7006: Parameter 'res' implicitly has an 'any' type"),
+            ("245,1", "TS2322: Type 'null' is not assignable to type 'User'"),
+        ]),
+        ("src/api/products.ts", &[
+            ("8,3",   "TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'string'. Type 'undefined' is not assignable to type 'string'"),
+            ("19,7",  "TS2345: Argument of type 'number | undefined' is not assignable to parameter of type 'number'"),
+            ("33,12", "TS2345: Argument of type 'Partial<Product>' is not assignable to parameter of type 'Product'"),
+            ("47,5",  "TS7006: Parameter 'filter' implicitly has an 'any' type"),
+            ("61,8",  "TS7006: Parameter 'options' implicitly has an 'any' type"),
+            ("75,3",  "TS2322: Type 'string | null' is not assignable to type 'string'"),
+            ("89,6",  "TS2322: Type 'undefined' is not assignable to type 'number'"),
+            ("103,9", "TS2339: Property 'sku' does not exist on type 'ProductVariant'"),
+        ]),
+        ("src/api/orders.ts", &[
+            ("15,4",  "TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'string'. Type 'undefined' is not assignable to type 'string'"),
+            ("28,9",  "TS2345: Argument of type 'OrderStatus | null' is not assignable to parameter of type 'OrderStatus'"),
+            ("42,6",  "TS2345: Argument of type 'number' is not assignable to parameter of type 'string'"),
+            ("56,3",  "TS7006: Parameter 'ctx' implicitly has an 'any' type"),
+            ("71,12", "TS7006: Parameter 'next' implicitly has an 'any' type"),
+            ("85,5",  "TS2304: Cannot find name 'OrderService'"),
+            ("99,8",  "TS2322: Type 'null' is not assignable to type 'Order'"),
+        ]),
+        ("src/auth/middleware.ts", &[
+            ("11,3",  "TS7006: Parameter 'req' implicitly has an 'any' type"),
+            ("22,7",  "TS7006: Parameter 'res' implicitly has an 'any' type"),
+            ("33,5",  "TS7006: Parameter 'next' implicitly has an 'any' type"),
+            ("44,9",  "TS2304: Cannot find name 'NextFunction'"),
+            ("55,2",  "TS2304: Cannot find name 'Request'"),
+            ("66,6",  "TS2304: Cannot find name 'Response'"),
+            ("77,8",  "TS2345: Argument of type 'JwtPayload | string' is not assignable to parameter of type 'AuthUser'"),
+            ("88,4",  "TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'string'. Type 'undefined' is not assignable to type 'string'"),
+            ("99,11", "TS2339: Property 'user' does not exist on type 'Request'"),
+        ]),
+        ("src/auth/jwt.ts", &[
+            ("9,5",   "TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'Secret'"),
+            ("23,3",  "TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'string'. Type 'undefined' is not assignable to type 'string'"),
+            ("37,8",  "TS2322: Type 'JwtPayload | string' is not assignable to type 'JwtPayload'"),
+            ("51,6",  "TS2322: Type 'string | undefined' is not assignable to type 'string'"),
+        ]),
+        ("src/models/user.ts", &[
+            ("7,1",   "TS1005: ',' expected"),
+            ("18,4",  "TS1005: ';' expected"),
+            ("29,7",  "TS2345: Argument of type 'number' is not assignable to parameter of type 'string'"),
+            ("40,2",  "TS2345: Argument of type 'boolean | undefined' is not assignable to parameter of type 'boolean'"),
+            ("51,9",  "TS2339: Property 'createdAt' does not exist on type 'UserInput'"),
+            ("62,5",  "TS2339: Property 'updatedAt' does not exist on type 'UserInput'"),
+        ]),
+        ("src/components/UserCard.tsx", &[
+            ("14,3",  "TS2741: Property 'onClick' is missing in type '{}' but required in type 'ButtonProps'"),
+            ("28,7",  "TS2741: Property 'variant' is missing in type '{ size: string; }' but required in type 'ButtonProps'"),
+            ("42,5",  "TS2322: Type 'string | null' is not assignable to type 'string'"),
+            ("56,9",  "TS2322: Type 'number | undefined' is not assignable to type 'number'"),
+            ("70,3",  "TS2339: Property 'loading' does not exist on type 'UserCardProps'"),
+            ("84,6",  "TS2339: Property 'error' does not exist on type 'UserCardProps'"),
+        ]),
+        ("src/components/ProductGrid.tsx", &[
+            ("11,4",  "TS2345: Argument of type 'Product[] | undefined' is not assignable to parameter of type 'Product[]'"),
+            ("25,8",  "TS2345: Argument of type 'string | null' is not assignable to parameter of type 'string'"),
+            ("39,5",  "TS2322: Type 'undefined' is not assignable to type 'ReactNode'"),
+            ("53,7",  "TS7006: Parameter 'item' implicitly has an 'any' type"),
+            ("67,3",  "TS7006: Parameter 'index' implicitly has an 'any' type"),
+        ]),
+        ("src/components/CheckoutForm.tsx", &[
+            ("18,6",  "TS2345: Argument of type 'FormEvent<HTMLFormElement>' is not assignable to parameter of type 'SyntheticEvent'"),
+            ("32,4",  "TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'string'. Type 'undefined' is not assignable to type 'string'"),
+            ("46,9",  "TS2322: Type 'string' is not assignable to type 'number'"),
+            ("60,2",  "TS2339: Property 'stripe' does not exist on type 'Window'"),
+            ("74,7",  "TS2339: Property 'elements' does not exist on type 'StripeContext'"),
+        ]),
+        ("src/hooks/useAuth.ts", &[
+            ("13,5",  "TS2345: Argument of type 'string | null' is not assignable to parameter of type 'string'"),
+            ("27,8",  "TS2345: Argument of type 'AuthState | undefined' is not assignable to parameter of type 'AuthState'"),
+            ("41,3",  "TS2322: Type 'null' is not assignable to type 'User'"),
+            ("55,6",  "TS7006: Parameter 'dispatch' implicitly has an 'any' type"),
+        ]),
+        ("src/hooks/useProducts.ts", &[
+            ("8,4",   "TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'string'. Type 'undefined' is not assignable to type 'string'"),
+            ("22,7",  "TS2345: Argument of type 'Filter | null' is not assignable to parameter of type 'Filter'"),
+            ("36,5",  "TS7006: Parameter 'query' implicitly has an 'any' type"),
+            ("50,9",  "TS2339: Property 'total' does not exist on type 'ProductsResponse'"),
+        ]),
+        ("src/store/cartSlice.ts", &[
+            ("16,3",  "TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'string'. Type 'undefined' is not assignable to type 'string'"),
+            ("30,6",  "TS2322: Type 'CartItem | undefined' is not assignable to type 'CartItem'"),
+            ("44,8",  "TS2339: Property 'quantity' does not exist on type 'never'"),
+            ("58,4",  "TS2304: Cannot find name 'Draft'"),
+        ]),
+        ("src/lib/stripe.ts", &[
+            ("12,7",  "TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'string'. Type 'undefined' is not assignable to type 'string'"),
+            ("26,3",  "TS2322: Type 'Stripe | null' is not assignable to type 'Stripe'"),
+            ("40,5",  "TS2345: Argument of type 'PaymentIntent | null' is not assignable to parameter of type 'PaymentIntent'"),
+        ]),
+        ("src/pages/checkout.tsx", &[
+            ("9,6",   "TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'string'. Type 'undefined' is not assignable to type 'string'"),
+            ("23,4",  "TS2345: Argument of type 'GetServerSidePropsContext | undefined' is not assignable to parameter of type 'GetServerSidePropsContext'"),
+            ("37,8",  "TS2322: Type 'string | string[]' is not assignable to type 'string'"),
+            ("51,2",  "TS2304: Cannot find name 'GetServerSideProps'"),
+        ]),
+        ("src/pages/profile.tsx", &[
+            ("7,5",   "TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'string'. Type 'undefined' is not assignable to type 'string'"),
+            ("21,9",  "TS2339: Property 'id' does not exist on type 'never'"),
+            ("35,3",  "TS2304: Cannot find name 'useParams'"),
+        ]),
     ];
-    for (file, line, code, msg) in &errors {
-        out.push_str(&format!("{}({},5): error {}: {}\n", file, line, code, msg));
+
+    for (file, errors) in files {
+        for (loc, msg) in *errors {
+            out.push_str(&format!("{}({}): error {}\n", file, loc, msg));
+        }
     }
-    out.push_str("\n");
-    out.push_str("Found 20 errors in 5 files.\n");
-    out.push_str("\n");
-    out.push_str("Errors  Files\n");
-    out.push_str("     5  src/api/users.ts\n");
-    out.push_str("     4  src/auth/middleware.ts\n");
-    out.push_str("     2  src/models/user.ts\n");
-    out.push_str("     3  src/components/UserCard.tsx\n");
-    out.push_str("     3  src/pages/Profile.tsx\n");
-    out.push_str("     3  src/utils/api.ts\n");
+
+    let total: usize = files.iter().map(|(_, e)| e.len()).sum();
+    out.push_str(&format!("\nFound {} errors in {} files.\n", total, files.len()));
     out
 }
 
@@ -1149,46 +1237,94 @@ fn go_test_output() -> String {
 }
 
 /// `mvn install` — verbose Maven build with many [INFO] lines.
+/// `mvn install` — realistic 8-module build with dependency downloads and verbose [INFO] noise.
+/// The handler strips Downloading/Downloaded/Progress/Compiling/bare-[INFO] lines,
+/// keeping only plugin separators, test results, and the reactor summary.
 fn maven_output() -> String {
     let mut out = String::new();
     out.push_str("[INFO] Scanning for projects...\n");
     out.push_str("[INFO] ------------------------------------------------------------------------\n");
     out.push_str("[INFO] Reactor Build Order:\n");
-    out.push_str("[INFO]   my-parent [pom]\n");
-    out.push_str("[INFO]   my-core [jar]\n");
-    out.push_str("[INFO]   my-service [jar]\n");
-    out.push_str("[INFO]   my-web [war]\n");
-    out.push_str("[INFO] ------------------------------------------------------------------------\n\n");
-    let modules = ["my-parent", "my-core", "my-service", "my-web"];
-    for module in &modules {
-        out.push_str(&format!("[INFO] Building {} 1.0.0-SNAPSHOT\n", module));
-        out.push_str("[INFO] --- maven-resources-plugin:3.3.0:resources (default-resources) @ my-module ---\n");
-        out.push_str("[INFO] Copying 15 resources from src/main/resources to target/classes\n");
-        out.push_str("[INFO] --- maven-compiler-plugin:3.11.0:compile (default-compile) @ my-module ---\n");
-        out.push_str("[INFO] Changes detected - recompiling the module! :dependency\n");
-        out.push_str("[INFO] Compiling 42 source files with javac [debug release 17] to target/classes\n");
-        out.push_str("[INFO] --- maven-resources-plugin:3.3.0:testResources (default-testResources) @ my-module ---\n");
-        out.push_str("[INFO] Copying 8 resources from src/test/resources to target/test-classes\n");
-        out.push_str("[INFO] --- maven-compiler-plugin:3.11.0:testCompile (default-testCompile) @ my-module ---\n");
-        out.push_str("[INFO] Compiling 18 source files with javac [debug release 17] to target/test-classes\n");
-        out.push_str("[INFO] --- maven-surefire-plugin:3.1.2:test (default-test) @ my-module ---\n");
-        out.push_str("[INFO] Using auto detected provider org.apache.maven.surefire.junit5.JUnit5Provider\n");
-        out.push_str("[INFO] Tests run: 45, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 3.456 s\n");
-        out.push_str("[INFO] --- maven-jar-plugin:3.3.0:jar (default-jar) @ my-module ---\n");
-        out.push_str("[INFO] Building jar: /project/target/my-module-1.0.0-SNAPSHOT.jar\n");
-        out.push_str("[INFO] --- maven-install-plugin:3.1.1:install (default-install) @ my-module ---\n");
-        out.push_str("[INFO] Installing /project/target/my-module-1.0.0-SNAPSHOT.jar to ~/.m2/...\n");
+    for m in &["my-parent", "my-common", "my-core", "my-data", "my-service", "my-api", "my-web", "my-integration-tests"] {
+        out.push_str(&format!("[INFO]   {} [jar]\n", m));
     }
+    out.push_str("[INFO] ------------------------------------------------------------------------\n\n");
+
+    // Dependency resolution noise (all dropped by handler)
+    let deps = [
+        "org.springframework.boot:spring-boot-starter:3.2.1",
+        "org.springframework.boot:spring-boot-autoconfigure:3.2.1",
+        "org.springframework:spring-core:6.1.3",
+        "org.springframework:spring-context:6.1.3",
+        "org.springframework:spring-beans:6.1.3",
+        "org.springframework:spring-aop:6.1.3",
+        "org.springframework.data:spring-data-jpa:3.2.1",
+        "org.hibernate.orm:hibernate-core:6.4.1",
+        "jakarta.persistence:jakarta.persistence-api:3.1.0",
+        "com.zaxxer:HikariCP:5.1.0",
+        "org.postgresql:postgresql:42.7.1",
+        "org.flywaydb:flyway-core:10.6.0",
+        "io.jsonwebtoken:jjwt-api:0.12.3",
+        "org.springdoc:springdoc-openapi-starter-webmvc-ui:2.3.0",
+        "com.fasterxml.jackson.core:jackson-databind:2.16.1",
+    ];
+    for dep in &deps {
+        out.push_str(&format!("[INFO] Downloading from central: https://repo.maven.apache.org/maven2/{}\n", dep.replace(':', "/")));
+    }
+    for dep in &deps {
+        let kb = 45 + dep.len() % 200;
+        out.push_str(&format!("[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/{} ({} kB at 1.2 MB/s)\n", dep.replace(':', "/"), kb));
+    }
+    out.push_str("[INFO] Progress (1): Downloading 8/15 (53%)\n");
+    out.push_str("[INFO] Progress (1): Downloading 15/15\n\n");
+
+    let modules = [
+        ("my-parent",             0.312,  0,  0),
+        ("my-common",             3.891, 12,  0),
+        ("my-core",              12.456, 87,  0),
+        ("my-data",               8.234, 54,  0),
+        ("my-service",           15.789, 134, 0),
+        ("my-api",                6.123, 43,  0),
+        ("my-web",                9.456, 67,  0),
+        ("my-integration-tests",  4.678, 38,  0),
+    ];
+
+    for (module, elapsed, tests, failures) in &modules {
+        out.push_str(&format!("[INFO] ------------------------------------------------------------------------\n"));
+        out.push_str(&format!("[INFO] Building {} 1.0.0-SNAPSHOT\n", module));
+        out.push_str(&format!("[INFO] --- maven-resources-plugin:3.3.0:resources (default-resources) @ {} ---\n", module));
+        out.push_str("[INFO] Copying 15 resources from src/main/resources to target/classes\n");
+        out.push_str("[INFO]\n");
+        out.push_str(&format!("[INFO] --- maven-compiler-plugin:3.11.0:compile (default-compile) @ {} ---\n", module));
+        out.push_str("[INFO] Changes detected - recompiling the module! :dependency\n");
+        out.push_str("[INFO] Compiling 64 source files with javac [debug release 17] to target/classes\n");
+        out.push_str("[INFO]\n");
+        out.push_str(&format!("[INFO] --- maven-compiler-plugin:3.11.0:testCompile (default-testCompile) @ {} ---\n", module));
+        out.push_str("[INFO] Compiling 23 source files with javac [debug release 17] to target/test-classes\n");
+        out.push_str("[INFO]\n");
+        if *tests > 0 {
+            out.push_str(&format!("[INFO] --- maven-surefire-plugin:3.1.2:test (default-test) @ {} ---\n", module));
+            out.push_str("[INFO] Using auto detected provider org.apache.maven.surefire.junit5.JUnit5Provider\n");
+            out.push_str(&format!("[INFO] Tests run: {}, Failures: {}, Errors: 0, Skipped: 0, Time elapsed: {:.3} s\n", tests, failures, elapsed * 0.4));
+            out.push_str("[INFO]\n");
+        }
+        out.push_str(&format!("[INFO] --- maven-jar-plugin:3.3.0:jar (default-jar) @ {} ---\n", module));
+        out.push_str(&format!("[INFO] Building jar: /project/{}/target/{}-1.0.0-SNAPSHOT.jar\n", module, module));
+        out.push_str("[INFO]\n");
+        out.push_str(&format!("[INFO] --- maven-install-plugin:3.1.1:install (default-install) @ {} ---\n", module));
+        out.push_str(&format!("[INFO] Installing /project/{}/target/{}-1.0.0-SNAPSHOT.jar to /home/user/.m2/repository/com/example/{}/1.0.0-SNAPSHOT/{}-1.0.0-SNAPSHOT.jar\n", module, module, module, module));
+        out.push_str("[INFO]\n");
+    }
+
     out.push_str("[INFO] ------------------------------------------------------------------------\n");
     out.push_str("[INFO] Reactor Summary for my-parent 1.0.0-SNAPSHOT:\n");
-    out.push_str("[INFO]  * my-parent ....................................... SUCCESS [  0.312 s]\n");
-    out.push_str("[INFO]  * my-core ......................................... SUCCESS [ 12.456 s]\n");
-    out.push_str("[INFO]  * my-service ...................................... SUCCESS [  8.789 s]\n");
-    out.push_str("[INFO]  * my-web .......................................... SUCCESS [  5.123 s]\n");
+    for (module, elapsed, _, _) in &modules {
+        out.push_str(&format!("[INFO]  * {:40} SUCCESS [ {:6.3} s]\n", module, elapsed));
+    }
     out.push_str("[INFO] ------------------------------------------------------------------------\n");
     out.push_str("[INFO] BUILD SUCCESS\n");
     out.push_str("[INFO] ------------------------------------------------------------------------\n");
-    out.push_str("[INFO] Total time:  27.45 s\n");
+    out.push_str("[INFO] Total time:  60.939 s\n");
     out.push_str("[INFO] Finished at: 2024-01-15T10:23:45+00:00\n");
     out.push_str("[INFO] ------------------------------------------------------------------------\n");
     out
@@ -1287,40 +1423,67 @@ fn clippy_verbose() -> String {
 }
 
 /// `golangci-lint run` — many INFO/DEBUG lines + diagnostics.
+/// `golangci-lint` — large project with heavy INFO/DEBU preamble and 100+ diagnostics.
+/// The handler drops all INFO/DEBU lines and caps diagnostics at 40 + "[+N more]".
 fn golangci_output() -> String {
     let mut out = String::new();
-    // Many INFO lines (get dropped)
-    out.push_str("INFO [config] Config search paths: [/home/user/project]\n");
+
+    // Heavy INFO/DEBU preamble (all dropped by handler)
+    out.push_str("INFO [config] Config search paths: [/home/user/project /home/user]\n");
     out.push_str("INFO [config] Used config file /home/user/project/.golangci.yml\n");
+    out.push_str("INFO [config] Run info: linters: 18, issues providers: 3\n");
     out.push_str("INFO [loader] Go packages loading in PACKAGES mode with GOFLAGS=\n");
-    out.push_str("INFO [loader] Packages load duration: 1.234s\n");
-    out.push_str("INFO [runner] Processors count: 8\n");
-    out.push_str("INFO [runner] Starting linters...\n");
-    for linter in &["errcheck", "gosimple", "govet", "ineffassign", "staticcheck", "unused", "deadcode", "varcheck", "structcheck", "golint"] {
-        out.push_str(&format!("INFO [runner] Running linter {}\n", linter));
+    out.push_str("INFO [loader] Packages load duration: 2.891s\n");
+    out.push_str("INFO [loader] Loaded 47 packages\n");
+    out.push_str("INFO [runner] Processors count: 12\n");
+    out.push_str("INFO [runner] Starting all linters...\n");
+    for linter in &["errcheck", "gosimple", "govet", "ineffassign", "staticcheck",
+                    "unused", "deadcode", "varcheck", "structcheck", "golint",
+                    "revive", "gocyclo", "gofmt", "goimports", "misspell",
+                    "godot", "godox", "nlreturn"] {
+        out.push_str(&format!("INFO [runner] Running linter: {}\n", linter));
+        out.push_str(&format!("DEBU [runner] linter {} took 0.{}s\n", linter, linter.len() * 37 % 999));
     }
-    out.push_str("INFO [runner] All linters have been run\n");
-    out.push_str("INFO [runner] Processing report\n");
-    out.push_str("WARN linters settings for 'structcheck' are not supported by golangci-lint v1.55+\n");
-    // Actual diagnostics
-    let files = ["pkg/api/handler.go", "pkg/auth/jwt.go", "pkg/models/user.go", "internal/db/postgres.go", "cmd/server/main.go"];
-    let issues = [
-        ("42:9", "ineffectual assignment to err (ineffassign)"),
-        ("55:3", "error return value not checked (errcheck)"),
-        ("67:14", "S1000: use plain channel send or receive instead of select with a single case (gosimple)"),
-        ("78:5", "declared and not used: `ctx` (unused)"),
-        ("91:12", "exported function should have comment or be unexported (golint)"),
-        ("103:7", "SA4006: this value of `err` is never used (staticcheck)"),
-        ("115:3", "structcheck: field `ID` is unused (structcheck)"),
-        ("127:18", "printf: fmt.Sprintf can be replaced with fmt.Sprint (govet)"),
+    out.push_str("INFO [runner] All linters finished\n");
+    out.push_str("INFO [runner] Processing 124 issues\n");
+    out.push_str("INFO [runner] Sorting issues\n");
+    out.push_str("WARN linters settings for 'structcheck' are not supported by golangci-lint v1.57+\n");
+    out.push_str("WARN linters settings for 'varcheck' are not supported by golangci-lint v1.57+\n");
+    out.push_str("WARN linters settings for 'deadcode' are not supported by golangci-lint v1.57+\n");
+
+    // Diagnostics: 12 files × 10 issues = 120 diagnostics (handler keeps 40, shows [+80 more])
+    let files = [
+        "pkg/api/handler.go",
+        "pkg/api/middleware.go",
+        "pkg/auth/jwt.go",
+        "pkg/auth/session.go",
+        "pkg/models/user.go",
+        "pkg/models/order.go",
+        "pkg/models/product.go",
+        "internal/db/postgres.go",
+        "internal/db/migrations.go",
+        "internal/cache/redis.go",
+        "cmd/server/main.go",
+        "cmd/worker/main.go",
     ];
-    for (fi, file) in files.iter().enumerate() {
-        for (ci, (pos, issue)) in issues.iter().enumerate() {
-            if (fi + ci) % 3 != 0 {
-                out.push_str(&format!("{}:{}:{}\n", file, pos, issue));
-            }
+    let issues: &[(&str, &str)] = &[
+        ("12:9",  "ineffectual assignment to err (ineffassign)"),
+        ("27:3",  "error return value not checked (errcheck)"),
+        ("41:14", "S1000: use plain channel send or receive instead of select with a single case (gosimple)"),
+        ("56:5",  "declared and not used: `ctx` (unused)"),
+        ("70:12", "exported function `GetUser` should have comment or be unexported (golint)"),
+        ("84:7",  "SA4006: this value of `err` is never used (staticcheck)"),
+        ("98:3",  "SA1006: Printf with dynamic first argument and no further arguments (staticcheck)"),
+        ("112:18","printf: fmt.Sprintf can be replaced with fmt.Sprint (govet)"),
+        ("126:5", "Function 'ProcessOrder' has too high cyclomatic complexity (12 > 10) (gocyclo)"),
+        ("140:9", "Comment should end with a period (godot)"),
+    ];
+    for file in &files {
+        for (pos, issue) in issues {
+            out.push_str(&format!("{}:{}:{}\n", file, pos, issue));
         }
     }
+
     out
 }
 
@@ -1554,7 +1717,7 @@ fn benchmark_handlers() {
         row!("git diff", git, diff_raw, &["git","diff"], 40.0),
         row!("git push", git, push_raw, &["git","push"], 10.0),
         // ── JavaScript / TypeScript ──────────────────────────────────────────
-        row!("tsc", tsc, tsc_raw, &["tsc"], 28.0),
+        row!("tsc", tsc, tsc_raw, &["tsc"], 40.0),
         row!("jest", jest, jest_raw, &["jest"], 50.0),
         row!("vitest", vitest, vitest_raw, &["vitest"], 50.0),
         row!("eslint", eslint, eslint_raw, &["eslint"], 60.0),
@@ -1566,9 +1729,9 @@ fn benchmark_handlers() {
         row!("pip install", pip, pip_raw, &["pip","install"], 30.0),
         // ── Go ───────────────────────────────────────────────────────────────
         row!("go test", go, go_raw, &["go","test"], 50.0),
-        row!("golangci-lint", golangci, golangci_raw, &["golangci-lint"], 30.0),
+        row!("golangci-lint", golangci, golangci_raw, &["golangci-lint"], 60.0),
         // ── Java / JVM ───────────────────────────────────────────────────────
-        row!("mvn install", maven, maven_raw, &["mvn","install"], 40.0),
+        row!("mvn install", maven, maven_raw, &["mvn","install"], 55.0),
         row!("gradle build", gradle, gradle_raw, &["gradle","build"], 40.0),
         // ── DevOps ───────────────────────────────────────────────────────────
         row!("kubectl get pods", kubectl, kubectl_raw, &["kubectl","get"], 10.0),
