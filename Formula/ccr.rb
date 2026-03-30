@@ -44,6 +44,14 @@ class Ccr < Formula
     ENV["ORT_STRATEGY"] = "system"
 
     system "cargo", "install", *std_cargo_args(path: "ccr")
+
+    # Install the ORT dylib so it's available at runtime.
+    # The binary has @rpath/libonnxruntime.*.dylib embedded; adding #{lib} to
+    # its rpath lets dyld resolve it after `brew install`.
+    if ort_lib
+      lib.install Dir["#{ort_lib}/libonnxruntime*.dylib"]
+      system "install_name_tool", "-add_rpath", lib.to_s, "#{bin}/ccr"
+    end
   end
 
   def caveats
