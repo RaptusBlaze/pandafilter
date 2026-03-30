@@ -517,21 +517,16 @@ config/         Embedded default filter patterns (git, cargo, npm, docker)
 
 ## Uninstall
 
-**Homebrew (macOS):**
+**Step 1 — remove hooks from Claude Code** (works for all install methods):
 ```bash
-brew uninstall ccr
-brew untap AssafWoo/ccr
+ccr init --uninstall
 ```
 
-**cargo install (Linux / from source):**
+**Step 2 — remove the binary:**
 ```bash
-cargo uninstall ccr
-```
-
-**Remove hooks from Claude Code** (both install methods):
-Open `~/.claude/settings.json` and remove any entries referencing `ccr` from the `hooks` arrays. Also delete the hook script:
-```bash
-rm ~/.claude/hooks/ccr-rewrite.sh
+brew uninstall ccr && brew untap AssafWoo/ccr   # Homebrew
+# or
+cargo uninstall ccr                              # cargo install
 ```
 
 **Optional — remove cached data:**

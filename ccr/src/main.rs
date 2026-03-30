@@ -40,7 +40,11 @@ enum Commands {
     #[command(hide = true)]
     Hook,
     /// Install CCR hooks into Claude Code settings.json
-    Init,
+    Init {
+        /// Remove CCR hooks and scripts instead of installing them
+        #[arg(long)]
+        uninstall: bool,
+    },
     /// Execute a command through CCR's specialized handlers
     Run {
         /// The command and its arguments
@@ -122,7 +126,7 @@ fn main() {
         Commands::Filter { command } => cmd::filter::run(command),
         Commands::Gain { history, days } => cmd::gain::run(history, days),
         Commands::Hook => hook::run(),
-        Commands::Init => init(),
+        Commands::Init { uninstall } => if uninstall { uninstall_ccr() } else { init() },
         Commands::Run { args } => cmd::run::run(args),
         Commands::Rewrite { command } => cmd::rewrite::run(command),
         Commands::Proxy { args } => cmd::proxy::run(args),
@@ -214,6 +218,61 @@ jq -n --argjson updated "$UPDATED_INPUT" \
         eprintln!("warning: could not pre-load BERT model: {e}");
         eprintln!("         it will download automatically on first use.");
     }
+
+    Ok(())
+}
+
+fn uninstall_ccr() -> anyhow::Result<()> {
+    use serde_json::Value;
+
+    let home = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
+
+    let settings_path = home.join(".claude").join("settings.json");
+    let rewrite_script_path = home.join(".claude").join("hooks").join("ccr-rewrite.sh");
+
+    // Remove hook script
+    if rewrite_script_path.exists() {
+        std::fs::remove_file(&rewrite_script_path)?;
+        println!("Removed {}", rewrite_script_path.display());
+    }
+
+    // Strip CCR entries from settings.json
+    if settings_path.exists() {
+        let content = std::fs::read_to_string(&settings_path)?;
+        let mut settings: Value = serde_json::from_str(&content).unwrap_or(serde_json::json!({}));
+
+        let events = ["PostToolUse", "PreToolUse"];
+        for event in &events {
+            if let Some(arr) = settings["hooks"][event].as_array_mut() {
+                arr.retain(|entry| {
+                    // Remove entries whose hooks list contains a ccr command,
+                    // or whose command field references ccr.
+                    let cmd = entry["command"].as_str().unwrap_or("");
+                    if cmd.contains("ccr") {
+                        return false;
+                    }
+                    if let Some(hooks) = entry["hooks"].as_array() {
+                        let has_ccr = hooks.iter().any(|h| {
+                            h["command"].as_str().unwrap_or("").contains("ccr")
+                        });
+                        if has_ccr {
+                            return false;
+                        }
+                    }
+                    true
+                });
+            }
+        }
+
+        std::fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+        println!("Removed CCR hooks from {}", settings_path.display());
+    }
+
+    println!();
+    println!("CCR hooks removed. The binary itself can be uninstalled with:");
+    println!("  brew uninstall ccr          # if installed via Homebrew");
+    println!("  cargo uninstall ccr         # if installed via cargo");
 
     Ok(())
 }
