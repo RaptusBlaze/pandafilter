@@ -19,12 +19,15 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             asset_name: ccr-macos-arm64
+            ort_arch: arm64
           - target: x86_64-apple-darwin
             os: macos-latest
             asset_name: ccr-macos-x86_64
+            ort_arch: x86_64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             asset_name: ccr-linux-x86_64
+            ort_arch: ""
 
     steps:
       - uses: actions/checkout@v4
@@ -40,10 +43,35 @@ jobs:
       - name: Rename binary
         run: cp target/${{ matrix.target }}/release/ccr ${{ matrix.asset_name }}
 
-      - name: Upload binary
+      # macOS only: bundle binary + ORT dylib into a tarball so brew install
+      # needs no build dependencies and completes in seconds.
+      - name: Bundle binary + ORT dylib (macOS)
+        if: matrix.ort_arch != ''
+        run: |
+          ORT_VERSION="1.20.1"
+          ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-osx-${{ matrix.ort_arch }}-${ORT_VERSION}.tgz"
+
+          curl -fsSL "$ORT_URL" -o ort.tgz
+          mkdir ort-extracted
+          tar -xzf ort.tgz -C ort-extracted
+
+          # Pick the versioned dylib only (skip dSYM debug bundles)
+          DYLIB=$(find ort-extracted -name "libonnxruntime.*.dylib" ! -path "*.dSYM*" | head -1)
+
+          mkdir bundle
+          cp "${{ matrix.asset_name }}" bundle/ccr
+          cp "$DYLIB" bundle/
+          tar -czf "${{ matrix.asset_name }}.tar.gz" -C bundle .
+
+          echo "Bundle contents:"
+          tar -tzf "${{ matrix.asset_name }}.tar.gz"
+
+      - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.asset_name }}
+          # macOS: upload the tarball; Linux: upload the bare binary (used by install.sh)
+          files: |
+            ${{ matrix.ort_arch != '' && format('{0}.tar.gz', matrix.asset_name) || matrix.asset_name }}
           generate_release_notes: true
 
   update-formula:
@@ -56,38 +84,42 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           ref: main
 
-      - name: Update formula
+      - name: Compute SHA256s and update formula
         run: |
           TAG="${GITHUB_REF_NAME}"
-          URL="https://github.com/AssafWoo/homebrew-ccr/archive/refs/tags/${TAG}.tar.gz"
+          BASE="https://github.com/AssafWoo/homebrew-ccr/releases/download/${TAG}"
 
-          # Download to file — piping curl to sha256sum gives wrong hash on partial downloads
-          for i in $(seq 1 5); do
-            curl -fsSL "$URL" -o /tmp/ccr-release.tar.gz && break
-            echo "Download attempt $i failed, retrying..."
-            sleep 5
+          # Download both macOS tarballs (release assets may take a moment to appear)
+          for ARCH in arm64 x86_64; do
+            FILE="/tmp/ccr-macos-${ARCH}.tar.gz"
+            for i in $(seq 1 10); do
+              curl -fsSL "${BASE}/ccr-macos-${ARCH}.tar.gz" -o "$FILE" && break
+              echo "Waiting for ccr-macos-${ARCH}.tar.gz (attempt $i)..."
+              sleep 10
+            done
+            SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
+            if [ "$SIZE" -lt 102400 ]; then
+              echo "ERROR: ccr-macos-${ARCH}.tar.gz is only ${SIZE} bytes"
+              exit 1
+            fi
           done
 
-          # Validate — a real tarball is at least 100 KB
-          SIZE=$(stat -c%s /tmp/ccr-release.tar.gz 2>/dev/null || echo 0)
-          if [ "$SIZE" -lt 102400 ]; then
-            echo "ERROR: tarball is only ${SIZE} bytes — download likely failed"
-            exit 1
-          fi
+          ARM64_SHA=$(sha256sum /tmp/ccr-macos-arm64.tar.gz | awk '{print $1}')
+          X86_SHA=$(sha256sum /tmp/ccr-macos-x86_64.tar.gz | awk '{print $1}')
 
-          SHA256=$(sha256sum /tmp/ccr-release.tar.gz | awk '{print $1}')
-          echo "URL:    $URL"
-          echo "SHA256: $SHA256"
+          echo "arm64  SHA256: $ARM64_SHA"
+          echo "x86_64 SHA256: $X86_SHA"
 
-          # Update only the top-level url and sha256 lines (2-space indent).
-          # Resource sha256 lines (6-space indent) are left untouched.
-          sed -i \
-            -e "s|^  url \".*homebrew-ccr.*\"|  url \"$URL\"|" \
-            -e "s|^  sha256 \"[a-f0-9]*\"|  sha256 \"$SHA256\"|" \
-            Formula/ccr.rb
+          # Update download URLs (replace old version tag)
+          sed -i "s|releases/download/v[^/]*/ccr-macos-arm64\.tar\.gz|releases/download/${TAG}/ccr-macos-arm64.tar.gz|g" Formula/ccr.rb
+          sed -i "s|releases/download/v[^/]*/ccr-macos-x86_64\.tar\.gz|releases/download/${TAG}/ccr-macos-x86_64.tar.gz|g" Formula/ccr.rb
+
+          # Update SHA256s — match the sha256 line immediately after each URL line
+          sed -i "/ccr-macos-arm64\.tar\.gz/{n; s/sha256 \"[a-f0-9]*/sha256 \"${ARM64_SHA}/}" Formula/ccr.rb
+          sed -i "/ccr-macos-x86_64\.tar\.gz/{n; s/sha256 \"[a-f0-9]*/sha256 \"${X86_SHA}/}" Formula/ccr.rb
 
           echo "--- Formula after update ---"
-          head -6 Formula/ccr.rb
+          head -18 Formula/ccr.rb
 
       - name: Commit and push formula
         run: |
@@ -95,5 +127,5 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/ccr.rb
           git diff --cached --quiet && echo "No formula changes" && exit 0
-          git commit -m "chore: update formula SHA256 for ${GITHUB_REF_NAME}"
+          git commit -m "chore: update formula for ${GITHUB_REF_NAME}"
           git push origin HEAD:main
