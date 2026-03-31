@@ -116,6 +116,9 @@ jobs:
           echo "arm64  SHA256: $ARM64_SHA"
           echo "x86_64 SHA256: $X86_SHA"
 
+          # Update explicit version field
+          sed -i "s|version \"[0-9.]*\"|version \"${TAG#v}\"|g" Formula/ccr.rb
+
           # Update download URLs (replace old version tag)
           sed -i "s|releases/download/v[^/]*/ccr-macos-arm64\.tar\.gz|releases/download/${TAG}/ccr-macos-arm64.tar.gz|g" Formula/ccr.rb
           sed -i "s|releases/download/v[^/]*/ccr-macos-x86_64\.tar\.gz|releases/download/${TAG}/ccr-macos-x86_64.tar.gz|g" Formula/ccr.rb
