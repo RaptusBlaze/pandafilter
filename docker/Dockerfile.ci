@@ -1,0 +1,26 @@
+# CI-optimized test image.
+# Accepts a pre-built Linux binary via build arg — no cargo compile inside Docker.
+# The release workflow builds the binary natively (with GH Actions cache),
+# then runs this image. Total Docker build time: ~10 seconds.
+FROM ubuntu:24.04
+
+ARG CCR_BINARY=target/x86_64-unknown-linux-gnu/release/ccr
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git jq sqlite3 python3 make bash ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Inject the pre-built binary
+COPY ${CCR_BINARY} /usr/local/bin/ccr
+RUN chmod +x /usr/local/bin/ccr
+
+# Test scripts and fixtures
+COPY docker/test.sh /src/docker/test.sh
+COPY docker/fixtures/ /src/docker/fixtures/
+RUN chmod +x /src/docker/test.sh
+
+RUN useradd -m -s /bin/bash testuser
+USER testuser
+WORKDIR /home/testuser
+
+ENTRYPOINT ["/src/docker/test.sh"]
