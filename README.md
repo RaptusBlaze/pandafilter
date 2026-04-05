@@ -18,6 +18,7 @@ Numbers from `ccr/tests/handler_benchmarks.rs`. Run `cargo test -p ccr benchmark
 | `pytest` | 3,818 | 162 | **−96%** |
 | `terraform plan` | 3,926 | 163 | **−96%** |
 | `npm install` | 648 | 25 | **−96%** |
+| `ember build` | 3,377 | 139 | **−96%** |
 | `cargo build` | 1,923 | 93 | **−95%** |
 | `cargo test` | 2,782 | 174 | **−94%** |
 | `next build` | 549 | 53 | **−90%** |
@@ -49,7 +50,7 @@ Numbers from `ccr/tests/handler_benchmarks.rs`. Run `cargo test -p ccr benchmark
 | `tsc` | 2,598 | 1,320 | −49% |
 | `mypy` | 2,053 | 1,088 | −47% |
 | `stylelint` | 1,100 | 845 | −23% |
-| **Total** | **69,727** | **15,846** | **−77%** |
+| **Total** | **73,104** | **15,985** | **−78%** |
 
 ---
 
@@ -185,7 +186,7 @@ ccr proxy git status                  # run raw (no filtering), record analytics
 
 ## Handlers
 
-48 handlers (60+ command aliases) in `ccr/src/handlers/`. Lookup cascade:
+49 handlers (60+ command aliases) in `ccr/src/handlers/`. Lookup cascade:
 
 1. **User filters** — `.ccr/filters.toml` or `~/.config/ccr/filters.toml`
 2. **Exact match** — direct command name
@@ -197,6 +198,7 @@ ccr proxy git status                  # run raw (no filtering), record analytics
 | **cargo** | `cargo` | `build`/`clippy`: errors + warning count. `test`: failures + summary. |
 | **git** | `git` | `status`: counts. `log`: `--oneline`, cap 20. `diff`: 2 context lines, 200-line cap. |
 | **go** | `go` | `test`: NDJSON streaming, FAIL blocks + summary. `build`: errors only. |
+| **ember** | `ember` | `build`: errors + summary; drops fingerprint/asset spam. `test`: failures + summary. `serve`: serving URL only. |
 | **tsc** | `tsc` | Errors grouped by file; deduplicates repeated TS codes. `Build OK` on clean. Injects `--noEmit`. |
 | **vitest** | `vitest` | FAIL blocks + summary; drops `✓` lines. |
 | **jest** | `jest`, `bun`, `deno` | `●` failure blocks + summary; drops `PASS` lines. |

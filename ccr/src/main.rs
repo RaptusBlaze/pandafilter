@@ -57,6 +57,9 @@ enum Commands {
         /// Show per-command breakdown table
         #[arg(long)]
         breakdown: bool,
+        /// Show insight view: categorized savings and top individual wins
+        #[arg(long)]
+        insight: bool,
     },
     /// Diagnose CCR installation: hook scripts, settings, analytics DB
     Doctor,
@@ -161,7 +164,7 @@ fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
         Commands::Filter { command } => cmd::filter::run(command),
-        Commands::Gain { history, days, breakdown } => cmd::gain::run(history, days, breakdown),
+        Commands::Gain { history, days, breakdown, insight } => cmd::gain::run(history, days, breakdown, insight),
         Commands::Doctor => cmd::doctor::run(),
         Commands::Hook => hook::run(),
         Commands::Init { uninstall, agent } => match (uninstall, agent) {

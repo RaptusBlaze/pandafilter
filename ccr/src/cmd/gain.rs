@@ -41,10 +41,12 @@ fn resolve_price() -> (f64, String) {
     (3.00 / 1_000_000.0, "$3.00/1M (set ANTHROPIC_MODEL to auto-detect)".to_string())
 }
 
-pub fn run(history: bool, days: u32, breakdown: bool) -> Result<()> {
+pub fn run(history: bool, days: u32, breakdown: bool, insight: bool) -> Result<()> {
     let records = load_records()?;
 
-    if history {
+    if insight {
+        print_insight(&records, days);
+    } else if history {
         print_history(&records, days);
     } else {
         print_summary(&records, breakdown);
@@ -601,4 +603,400 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+/// Format a unix timestamp as "Mon DD" (UTC), e.g. "Apr 05".
+fn unix_to_month_day(ts: u64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let (_, month, day) = days_to_ymd(ts / 86400);
+    let m = MONTHS[(month.saturating_sub(1).min(11)) as usize];
+    format!("{} {:02}", m, day)
+}
+
+// ─── Insight view (--insight) ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum SavingsCategory {
+    NoiseReduction,
+    BuildFiltering,
+    PipelineSavings,
+    CommandCompression,
+}
+
+#[derive(Default)]
+struct CategoryStats {
+    saved: usize,
+    input: usize,
+    count: usize,
+    /// command name → run count within this category
+    commands: std::collections::BTreeMap<String, usize>,
+    cache_hits: usize,
+}
+
+fn categorize(cmd: Option<&str>, cache_hit: bool) -> SavingsCategory {
+    if cache_hit {
+        return SavingsCategory::PipelineSavings;
+    }
+    let raw = match cmd {
+        None => return SavingsCategory::PipelineSavings,
+        Some(s) => s,
+    };
+    // Check pipeline event markers first (these are exact stored values)
+    let first_token = raw.split_whitespace().next().unwrap_or(raw);
+    match first_token {
+        "(read)" | "(read-level)" | "(glob)" | "(grep-tool)" | "(pipeline)" => {
+            return SavingsCategory::PipelineSavings;
+        }
+        _ => {}
+    }
+    // Normalize to get the effective command name (handles env vars, paths, rtk prefix)
+    let normalized = normalize_cmd_key(Some(raw));
+    let cmd_name = normalized.split_whitespace().next().unwrap_or(&normalized);
+    match cmd_name {
+        "(pipeline)" => SavingsCategory::PipelineSavings,
+        "find" | "ls" | "tree" => SavingsCategory::NoiseReduction,
+        "cargo" | "go" | "npm" | "yarn" | "pnpm" | "make" | "gmake"
+        | "mvn" | "gradle" | "pytest" | "jest" | "vitest" | "rspec"
+        | "tsc" | "ruff" | "mypy" | "rubocop" | "eslint" | "biome"
+        | "playwright" | "nx" | "turbo" | "uv" | "pip" | "rake"
+        | "ember" | "next" | "webpack" | "vite" | "stylelint" | "prettier" => {
+            SavingsCategory::BuildFiltering
+        }
+        _ => SavingsCategory::CommandCompression,
+    }
+}
+
+fn format_save_label(r: &Analytics) -> String {
+    let cmd = normalize_cmd_key(r.command.as_deref());
+    match r.subcommand.as_deref() {
+        Some(sub) if !sub.is_empty() => {
+            let sub_display = if sub.len() > 30 {
+                format!("\u{2026}{}", &sub[sub.len() - 28..])
+            } else {
+                sub.to_string()
+            };
+            format!("{} {}", cmd, sub_display)
+        }
+        _ => cmd,
+    }
+}
+
+/// Aggregate windowed records into per-category stats and a time-ordered list.
+/// Returns (category_map, windowed_records_sorted_by_tokens_saved_desc).
+fn aggregate_by_category(
+    records: &[Analytics],
+    cutoff: u64,
+) -> (BTreeMap<SavingsCategory, CategoryStats>, Vec<usize>) {
+    // Collect indices of records that pass the window filter
+    let windowed_indices: Vec<usize> = records
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.timestamp_secs > 0 && r.timestamp_secs >= cutoff)
+        .map(|(i, _)| i)
+        .collect();
+
+    let mut by_category: BTreeMap<SavingsCategory, CategoryStats> = BTreeMap::new();
+    for &i in &windowed_indices {
+        let r = &records[i];
+        let cat = categorize(r.command.as_deref(), r.cache_hit);
+        let stats = by_category.entry(cat).or_default();
+        stats.saved += r.tokens_saved();
+        stats.input += r.input_tokens;
+        stats.count += 1;
+        let cmd_key = normalize_cmd_key(r.command.as_deref());
+        *stats.commands.entry(cmd_key).or_default() += 1;
+        if r.cache_hit {
+            stats.cache_hits += 1;
+        }
+    }
+
+    // Sort indices by tokens_saved descending for top-saves list
+    let mut sorted = windowed_indices;
+    sorted.sort_by(|&a, &b| records[b].tokens_saved().cmp(&records[a].tokens_saved()));
+
+    (by_category, sorted)
+}
+
+fn print_insight(records: &[Analytics], days: u32) {
+    let now_secs = now_unix();
+    let first_day_ts = now_secs.saturating_sub((days as u64).saturating_sub(1) * 86400);
+    let cutoff = first_day_ts - (first_day_ts % 86400);
+
+    println!(
+        "{}",
+        format!("Your token savings  (last {} days)", days)
+            .if_supports_color(Stdout, |t| t.bold())
+    );
+    println!("{}", "═".repeat(55).if_supports_color(Stdout, |t| t.dimmed()));
+    println!();
+
+    let (by_category, sorted_indices) = aggregate_by_category(records, cutoff);
+
+    if sorted_indices.is_empty() {
+        println!("  No token savings recorded in this period.");
+        return;
+    }
+
+    let total_saved: usize = sorted_indices.iter().map(|&i| records[i].tokens_saved()).sum();
+
+    // Render categories in fixed order
+    let category_order: &[(SavingsCategory, &str)] = &[
+        (SavingsCategory::NoiseReduction, "Noise reduction"),
+        (SavingsCategory::BuildFiltering, "Build filtering"),
+        (SavingsCategory::PipelineSavings, "Pipeline savings"),
+        (SavingsCategory::CommandCompression, "Command compression"),
+    ];
+
+    for (cat, label) in category_order {
+        if let Some(stats) = by_category.get(cat) {
+            let pct = if total_saved > 0 {
+                stats.saved as f32 / total_saved as f32 * 100.0
+            } else {
+                0.0
+            };
+
+            // Top 3 commands by run count
+            let mut cmd_list: Vec<(&String, &usize)> = stats.commands.iter().collect();
+            cmd_list.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+            let shown = cmd_list.len().min(3);
+            let extra = cmd_list.len().saturating_sub(3);
+            let mut cmd_parts: Vec<String> = cmd_list[..shown]
+                .iter()
+                .map(|(k, v)| format!("{} \u{00d7} {}", k, v))
+                .collect();
+            if extra > 0 {
+                cmd_parts.push(format!("+{} more", extra));
+            }
+            let mut cmd_str = cmd_parts.join(", ");
+            if *cat == SavingsCategory::PipelineSavings && stats.cache_hits > 0 {
+                let s = if stats.cache_hits == 1 { "" } else { "s" };
+                cmd_str.push_str(&format!(", incl. {} cache hit{}", stats.cache_hits, s));
+            }
+
+            let saved_str = fmt_tokens(stats.saved);
+            let pct_str = format!("{:.0}%", pct);
+            let line = format!(
+                "  {:<22} {:>6}  {:>4}   {}",
+                label, saved_str, pct_str, cmd_str
+            );
+
+            if pct >= 40.0 {
+                println!("{}", line.if_supports_color(Stdout, |t| t.green()));
+            } else if pct >= 15.0 {
+                println!("{}", line.if_supports_color(Stdout, |t| t.yellow()));
+            } else {
+                println!("{}", line.if_supports_color(Stdout, |t| t.dimmed()));
+            }
+        }
+    }
+
+    println!();
+
+    // Top 5 saves
+    let top_n = sorted_indices.len().min(5);
+    if top_n > 0 {
+        println!("  Top {} saves:", top_n);
+        for &i in &sorted_indices[..top_n] {
+            let r = &records[i];
+            let label = format_save_label(r);
+            let date = unix_to_month_day(r.timestamp_secs);
+            let saved = fmt_tokens(r.tokens_saved());
+            println!("    {:<32} {:<8}  {:>6}", label, date, saved);
+        }
+    }
+
+    println!();
+    println!(
+        "  Total saved: {}",
+        fmt_tokens(total_saved).if_supports_color(Stdout, |t| t.green())
+    );
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ccr_core::analytics::Analytics;
+
+    fn make_record(
+        cmd: Option<&str>,
+        sub: Option<&str>,
+        input: usize,
+        output: usize,
+        ts: u64,
+        cache_hit: bool,
+    ) -> Analytics {
+        Analytics {
+            input_tokens: input,
+            output_tokens: output,
+            savings_pct: if input > 0 {
+                (input.saturating_sub(output) as f32 / input as f32) * 100.0
+            } else {
+                0.0
+            },
+            command: cmd.map(|s| s.to_string()),
+            timestamp_secs: ts,
+            subcommand: sub.map(|s| s.to_string()),
+            duration_ms: None,
+            cache_hit,
+            agent: None,
+        }
+    }
+
+    // ── categorize() ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn categorize_find_is_noise() {
+        assert_eq!(categorize(Some("find"), false), SavingsCategory::NoiseReduction);
+    }
+
+    #[test]
+    fn categorize_cargo_is_build() {
+        assert_eq!(categorize(Some("cargo"), false), SavingsCategory::BuildFiltering);
+    }
+
+    #[test]
+    fn categorize_pipeline_markers() {
+        for marker in &["(read)", "(read-level)", "(glob)", "(grep-tool)", "(pipeline)"] {
+            assert_eq!(
+                categorize(Some(marker), false),
+                SavingsCategory::PipelineSavings,
+                "expected PipelineSavings for {}",
+                marker
+            );
+        }
+    }
+
+    #[test]
+    fn categorize_cache_hit_overrides_cmd() {
+        assert_eq!(
+            categorize(Some("git"), true),
+            SavingsCategory::PipelineSavings
+        );
+    }
+
+    #[test]
+    fn categorize_git_is_command_compression() {
+        assert_eq!(
+            categorize(Some("git"), false),
+            SavingsCategory::CommandCompression
+        );
+    }
+
+    #[test]
+    fn categorize_unknown_cmd_is_command_compression() {
+        assert_eq!(
+            categorize(Some("zzz_unknown_tool"), false),
+            SavingsCategory::CommandCompression
+        );
+    }
+
+    #[test]
+    fn categorize_none_cmd_is_pipeline() {
+        assert_eq!(categorize(None, false), SavingsCategory::PipelineSavings);
+    }
+
+    // ── format_save_label() ───────────────────────────────────────────────────
+
+    #[test]
+    fn label_with_subcommand() {
+        let r = make_record(Some("cargo"), Some("test"), 1000, 500, 1_700_000_000, false);
+        assert_eq!(format_save_label(&r), "cargo test");
+    }
+
+    #[test]
+    fn label_without_subcommand() {
+        let r = make_record(Some("git"), None, 1000, 500, 1_700_000_000, false);
+        assert_eq!(format_save_label(&r), "git");
+    }
+
+    #[test]
+    fn label_long_path_truncated() {
+        let long_sub = "a".repeat(40);
+        let r = make_record(Some("find"), Some(&long_sub), 1000, 500, 1_700_000_000, false);
+        let label = format_save_label(&r);
+        // Should be "find …<last 28 chars>"
+        assert!(label.starts_with("find "));
+        // Total subcommand display should be "…" + 28 chars = 29 chars (+ "find " prefix)
+        let sub_part = &label["find ".len()..];
+        assert!(sub_part.starts_with('\u{2026}'));
+        assert!(sub_part.len() <= 32); // ellipsis + 28 bytes
+    }
+
+    #[test]
+    fn label_pipeline_no_sub() {
+        let r = make_record(Some("(read)"), None, 1000, 500, 1_700_000_000, false);
+        // normalize_cmd_key("(read)") → "(pipeline)"
+        assert_eq!(format_save_label(&r), "(pipeline)");
+    }
+
+    // ── aggregation / integration ─────────────────────────────────────────────
+
+    #[test]
+    fn insight_aggregates_by_category() {
+        let records = vec![
+            make_record(Some("find"), None,  1000, 200, 1_700_000_000, false), // noise: 800
+            make_record(Some("find"), None,  500,  100, 1_700_000_001, false), // noise: 400
+            make_record(Some("cargo"), None, 2000, 500, 1_700_000_002, false), // build: 1500
+            make_record(Some("git"), None,   1000, 600, 1_700_000_003, false), // compression: 400
+            make_record(Some("(read)"), None, 800, 200, 1_700_000_004, false), // pipeline: 600
+        ];
+        let (by_cat, _) = aggregate_by_category(&records, 0);
+
+        assert_eq!(by_cat[&SavingsCategory::NoiseReduction].saved, 1200);
+        assert_eq!(by_cat[&SavingsCategory::BuildFiltering].saved, 1500);
+        assert_eq!(by_cat[&SavingsCategory::CommandCompression].saved, 400);
+        assert_eq!(by_cat[&SavingsCategory::PipelineSavings].saved, 600);
+    }
+
+    #[test]
+    fn insight_top_saves_sorted_correctly() {
+        let records = vec![
+            make_record(Some("git"), None,   1000, 800, 1_700_000_000, false), // saved: 200
+            make_record(Some("cargo"), None, 5000, 500, 1_700_000_001, false), // saved: 4500
+            make_record(Some("find"), None,  2000, 100, 1_700_000_002, false), // saved: 1900
+            make_record(Some("npm"), None,   3000, 800, 1_700_000_003, false), // saved: 2200
+            make_record(Some("grep"), None,  1000, 400, 1_700_000_004, false), // saved: 600
+        ];
+        let (_, sorted) = aggregate_by_category(&records, 0);
+        assert_eq!(sorted.len(), 5);
+        // First index should be the record with most tokens saved (cargo = 4500)
+        assert_eq!(records[sorted[0]].tokens_saved(), 4500);
+        // Second: npm = 2200
+        assert_eq!(records[sorted[1]].tokens_saved(), 2200);
+        // Third: find = 1900
+        assert_eq!(records[sorted[2]].tokens_saved(), 1900);
+    }
+
+    #[test]
+    fn insight_empty_window_no_panic() {
+        // All records have timestamp_secs = 0, so none pass the filter
+        let records = vec![
+            make_record(Some("cargo"), None, 1000, 500, 0, false),
+        ];
+        // Should not panic; returns empty aggregation
+        let (by_cat, sorted) = aggregate_by_category(&records, 1);
+        assert!(by_cat.is_empty());
+        assert!(sorted.is_empty());
+        // Also test print_insight with empty slice directly
+        print_insight(&[], 7);
+    }
+
+    #[test]
+    fn insight_cache_hit_counted_in_pipeline() {
+        let records = vec![
+            make_record(Some("git"), None, 1000, 300, 1_700_000_000, true), // cache_hit=true
+        ];
+        let (by_cat, _) = aggregate_by_category(&records, 0);
+
+        // Should be in PipelineSavings, not CommandCompression
+        assert!(by_cat.contains_key(&SavingsCategory::PipelineSavings));
+        assert!(!by_cat.contains_key(&SavingsCategory::CommandCompression));
+        assert_eq!(by_cat[&SavingsCategory::PipelineSavings].cache_hits, 1);
+        assert_eq!(by_cat[&SavingsCategory::PipelineSavings].saved, 700);
+    }
 }

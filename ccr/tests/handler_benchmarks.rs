@@ -17,6 +17,7 @@ use ccr::handlers::{
     cargo::CargoHandler,
     clippy::ClippyHandler,
     docker::DockerHandler,
+    ember::EmberHandler,
     env::EnvHandler,
     eslint::EslintHandler,
     gh::GhHandler,
@@ -1210,6 +1211,52 @@ fn brew_install_output() -> String {
     out
 }
 
+/// `ember build` — realistic Ember CLI build with fingerprint spam + 6 errors.
+/// Progress/fingerprint lines (~140) are dropped; only errors + summary are kept.
+fn ember_build_output() -> String {
+    let mut out = String::new();
+    out.push_str("Build failed.\n");
+    out.push_str("cleaning up...\n\n");
+    // Fingerprint / asset pipeline noise (dropped by handler)
+    let asset_names = [
+        "app", "vendor", "test-support", "test-loader",
+        "ember-fetch/fetch", "@ember/test-helpers/index",
+    ];
+    for chunk in &["css", "js", "map"] {
+        for name in &asset_names {
+            for i in 0..12usize {
+                out.push_str(&format!(
+                    "  {} {}-{:x}{:x}.{}\n",
+                    name, name, i * 0xdeadbeef % 0xffff, i * 0xcafe % 0xffff, chunk
+                ));
+            }
+        }
+    }
+    // Build progress lines (dropped)
+    out.push_str("building: Compiling...\n");
+    out.push_str("building: ConcatMerge\n");
+    out.push_str("building: PrependTransform\n");
+    for module in &[
+        "app/router.js", "app/app.js", "app/index.html",
+        "app/styles/app.css", "config/environment.js",
+    ] {
+        out.push_str(&format!("  {}\n", module));
+    }
+    out.push_str("Babel plugins detected\n");
+    out.push_str("annotation: Build\n");
+    out.push_str("annotation: Concat: App\n");
+    out.push_str("annotation: Concat: Vendor\n");
+    // Actual errors (kept by handler)
+    out.push_str("app/components/user-profile.hbs:8:7: Error: Unexpected token '<'\n");
+    out.push_str("app/components/nav-bar.ts:14:3: error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'.\n");
+    out.push_str("app/templates/index.hbs:22:1: Error: Unclosed element `div`\n");
+    out.push_str("app/components/modal.js:55:5: Error: 'user' is not defined\n");
+    out.push_str("app/services/session.ts:33:1: error TS2304: Cannot find name 'inject'\n");
+    out.push_str("app/helpers/format-date.ts:12:3: error TS2307: Cannot find module '@ember/component' or its corresponding type declarations.\n");
+    out.push_str("\nBuild failed (3241ms)\n");
+    out
+}
+
 /// `go test ./...` — 150 tests with === RUN / --- PASS noise + 2 failures.
 fn go_test_output() -> String {
     let mut out = String::new();
@@ -1877,6 +1924,7 @@ fn benchmark_handlers() {
     let next       = NextHandler;
     let playwright = PlaywrightHandler;
     let pip        = PipHandler;
+    let ember      = EmberHandler;
     let vite       = ViteHandler;
     let webpack    = WebpackHandler;
     let turbo      = TurboHandler;
@@ -1904,6 +1952,7 @@ fn benchmark_handlers() {
     let gh_raw         = gh_pr_list_output();
     let grep_raw       = grep_many_matches();
     let brew_raw       = brew_install_output();
+    let ember_raw      = ember_build_output();
     let go_raw         = go_test_output();
     let maven_raw      = maven_output();
     let clippy_raw     = clippy_verbose();
@@ -1955,6 +2004,8 @@ fn benchmark_handlers() {
         // ── Python ───────────────────────────────────────────────────────────
         row!("pytest", pytest, pytest_raw, &["pytest"], 80.0),
         row!("pip install", pip, pip_raw, &["pip","install"], 30.0),
+        // ── Ember ─────────────────────────────────────────────────────────────
+        row!("ember build", ember, ember_raw, &["ember","build"], 70.0),
         // ── Go ───────────────────────────────────────────────────────────────
         row!("go test", go, go_raw, &["go","test"], 50.0),
         row!("golangci-lint", golangci, golangci_raw, &["golangci-lint"], 60.0),

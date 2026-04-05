@@ -27,6 +27,15 @@ pub fn write_baseline(script_path: &Path, hash_dir: &Path) -> anyhow::Result<()>
     // sha256sum-compatible format: two spaces between hash and filename
     let content = format!("{}  {}\n", hash, script_name);
     let hash_file = hash_dir.join(".ccr-hook.sha256");
+    // The file is written 0o444 (read-only) after each init. Make it writable
+    // before overwriting so that re-running `ccr init` doesn't fail with EACCES.
+    #[cfg(unix)]
+    if hash_file.exists() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&hash_file)?.permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&hash_file, perms)?;
+    }
     std::fs::write(&hash_file, &content)?;
     #[cfg(unix)]
     {
@@ -145,6 +154,19 @@ mod tests {
             verify_hook(&script, tmp.path()),
             IntegrityStatus::OrphanedHash
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_baseline_idempotent_after_readonly() {
+        // Simulates re-running `ccr init` after the hash file was set to 0o444.
+        // The second write_baseline call must not fail with Permission denied.
+        let tmp = tempfile::tempdir().unwrap();
+        let script = write_script(tmp.path(), "#!/bin/bash\necho hello\n");
+        write_baseline(&script, tmp.path()).unwrap();
+        // Second call — file is now read-only, must still succeed
+        write_baseline(&script, tmp.path()).unwrap();
+        assert!(matches!(verify_hook(&script, tmp.path()), IntegrityStatus::Verified));
     }
 
     #[cfg(unix)]
