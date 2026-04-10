@@ -1,32 +1,32 @@
 #!/usr/bin/env bash
-# CCR installer
+# PandaFilter installer
 # On macOS: installs via Homebrew (prebuilt binary, takes seconds).
 # On Linux / no-brew: builds from source via cargo (~1 min on first run).
 set -e
 
-REPO_URL="https://github.com/AssafWoo/homebrew-ccr.git"
+REPO_URL="https://github.com/AssafWoo/PandaFilter.git"
 CARGO_BIN="${CARGO_HOME:-$HOME/.cargo}/bin"
 
 # ── macOS: prefer Homebrew ────────────────────────────────────────────────────
 
 if [[ "$(uname)" == "Darwin" ]] && command -v brew &>/dev/null; then
-  brew tap assafwoo/ccr 2>/dev/null || true
+  brew tap assafwoo/pandafilter 2>/dev/null || true
 
   # Detect the "64" bad-keg: older installs stored the keg as version "64"
   # (inferred from "arm64" in the asset URL). brew upgrade skips it because
   # 64 > 0.5.x. Force a reinstall to fix the keg name once and for all.
-  CELLAR="$(brew --cellar assafwoo/ccr/ccr 2>/dev/null || true)"
+  CELLAR="$(brew --cellar assafwoo/pandafilter/ccr 2>/dev/null || true)"
   if [[ -n "$CELLAR" && -d "$CELLAR/64" ]]; then
     echo "Detected stale keg (version \"64\") — reinstalling to fix..."
-    brew reinstall assafwoo/ccr/ccr
-  elif brew list assafwoo/ccr/ccr &>/dev/null 2>&1; then
-    brew upgrade assafwoo/ccr/ccr || true
+    brew reinstall assafwoo/pandafilter/ccr
+  elif brew list assafwoo/pandafilter/ccr &>/dev/null 2>&1; then
+    brew upgrade assafwoo/pandafilter/ccr || true
   else
-    brew install assafwoo/ccr/ccr
+    brew install assafwoo/pandafilter/ccr
   fi
 
   echo ""
-  echo "CCR installed. You're all set — hooks are registered automatically."
+  echo "PandaFilter installed. You're all set — hooks are registered automatically."
   exit 0
 fi
 
@@ -39,7 +39,7 @@ if ! command -v cargo &>/dev/null; then
   source "$HOME/.cargo/env"
 fi
 
-echo "Building CCR from source (this takes ~1 min on first run)..."
+echo "Building PandaFilter from source (this takes ~1 min on first run)..."
 cargo install --git "$REPO_URL" --bin ccr --locked 2>&1
 
 # ── Ensure ~/.cargo/bin is on PATH ────────────────────────────────────────────
@@ -49,7 +49,7 @@ add_to_path() {
   local line='export PATH="$HOME/.cargo/bin:$PATH"'
   if [ -f "$rc" ] && ! grep -qF '.cargo/bin' "$rc"; then
     echo "" >> "$rc"
-    echo "# Added by CCR installer" >> "$rc"
+    echo "# Added by PandaFilter installer" >> "$rc"
     echo "$line" >> "$rc"
     echo "  → Added cargo/bin to $rc"
   fi
@@ -77,4 +77,4 @@ else
 fi
 
 echo ""
-echo "CCR installed. Open a new terminal (or run: source ~/.cargo/env) and you're set."
+echo "PandaFilter installed. Open a new terminal (or run: source ~/.cargo/env) and you're set."
