@@ -210,24 +210,24 @@ jobs:
           echo "x86_64 SHA256: $X86_SHA"
 
           # Update explicit version field
-          sed -i "s|version \"[0-9.]*\"|version \"${TAG#v}\"|g" Formula/ccr.rb
+          sed -i "s|version \"[0-9.]*\"|version \"${TAG#v}\"|g" Formula/pandafilter.rb
 
           # Update download URLs (replace old version tag)
-          sed -i "s|releases/download/v[^/]*/ccr-macos-arm64\.tar\.gz|releases/download/${TAG}/ccr-macos-arm64.tar.gz|g" Formula/ccr.rb
-          sed -i "s|releases/download/v[^/]*/ccr-macos-x86_64\.tar\.gz|releases/download/${TAG}/ccr-macos-x86_64.tar.gz|g" Formula/ccr.rb
+          sed -i "s|releases/download/v[^/]*/ccr-macos-arm64\.tar\.gz|releases/download/${TAG}/ccr-macos-arm64.tar.gz|g" Formula/pandafilter.rb
+          sed -i "s|releases/download/v[^/]*/ccr-macos-x86_64\.tar\.gz|releases/download/${TAG}/ccr-macos-x86_64.tar.gz|g" Formula/pandafilter.rb
 
           # Update SHA256s — match the sha256 line immediately after each URL line
-          sed -i "/ccr-macos-arm64\.tar\.gz/{n; s/sha256 \"[a-f0-9]*/sha256 \"${ARM64_SHA}/}" Formula/ccr.rb
-          sed -i "/ccr-macos-x86_64\.tar\.gz/{n; s/sha256 \"[a-f0-9]*/sha256 \"${X86_SHA}/}" Formula/ccr.rb
+          sed -i "/ccr-macos-arm64\.tar\.gz/{n; s/sha256 \"[a-f0-9]*/sha256 \"${ARM64_SHA}/}" Formula/pandafilter.rb
+          sed -i "/ccr-macos-x86_64\.tar\.gz/{n; s/sha256 \"[a-f0-9]*/sha256 \"${X86_SHA}/}" Formula/pandafilter.rb
 
           echo "--- Formula after update ---"
-          head -18 Formula/ccr.rb
+          head -18 Formula/pandafilter.rb
 
       - name: Commit and push formula
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/ccr.rb
+          git add Formula/pandafilter.rb
           git diff --cached --quiet && echo "No formula changes" && exit 0
           git commit -m "chore: update formula for ${GITHUB_REF_NAME}"
           git pull --rebase origin main
