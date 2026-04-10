@@ -459,7 +459,7 @@ run_check "panda doctor shows rewrite check" \
 # ── Failure scenario 1: DB never created (panda run never called) ──────────────
 # Test that 0-record state is clearly reported, not silently ignored
 FRESH_XDG=$(mktemp -d)
-FRESH_OUT=$(XDG_DATA_HOME0doctor 2>&1 || true)
+FRESH_OUT=$(XDG_DATA_HOME="$FRESH_XDG" panda doctor 2>&1 || true)
 if echo "$FRESH_OUT" | grep -q "NOT created yet\|0 records\|never been called"; then
   ok "panda doctor reports clearly when DB has no records yet"
 else
