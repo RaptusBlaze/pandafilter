@@ -1,5 +1,15 @@
 use anyhow::Result;
 
+/// Returns the full path to the running panda binary so rewritten commands
+/// work in non-interactive shells where `~/.cargo/bin` may not be in PATH.
+/// Falls back to `"panda"` if the path cannot be determined.
+fn panda_bin() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from))
+        .unwrap_or_else(|| "panda".to_string())
+}
+
 /// Rewrite a command string for PreToolUse injection.
 /// Prints the rewritten command and exits 0, or exits 1 if no rewrite is needed.
 pub fn run(command: String) -> Result<()> {
@@ -195,7 +205,7 @@ fn rewrite_head_tail(cmd: &str) -> Option<String> {
     let file = file?; // no file argument (reading stdin) — skip
     if file == "-" { return None; }
 
-    Some(format!("panda run cat {}", file))
+    Some(format!("{} run cat {}", panda_bin(), file))
 }
 
 /// Rewrite a single (non-compound) command.
@@ -236,7 +246,7 @@ fn rewrite_single(command: &str) -> Option<String> {
     let rewritten_args = handler.rewrite_args(&args);
 
     // Preserve env prefix before `ccr run` so the shell sets those vars for the process.
-    Some(format!("{}panda run {}", env_part, rewritten_args.join(" ")))
+    Some(format!("{}{} run {}", env_part, panda_bin(), rewritten_args.join(" ")))
 }
 
 /// Try to split a compound command on `operator` and rewrite each part.
@@ -279,7 +289,8 @@ mod tests {
     fn known_command_rewritten() {
         let result = rewrite_command("git status");
         // git status gets --porcelain injected via rewrite_args
-        assert_eq!(result, Some("panda run git status --porcelain".to_string()));
+        let r = result.expect("git status should be rewritten");
+        assert!(r.contains("run git status --porcelain"), "got: {}", r);
     }
 
     #[test]
@@ -287,7 +298,7 @@ mod tests {
         let result = rewrite_command("cargo build");
         // cargo build gets --message-format json injected
         let r = result.expect("cargo build should be rewritten");
-        assert!(r.starts_with("panda run cargo build"), "should be wrapped: {}", r);
+        assert!(r.contains("run cargo build"), "should be wrapped: {}", r);
         assert!(r.contains("--message-format"), "should inject --message-format: {}", r);
         assert!(r.contains("json"), "should inject json format: {}", r);
     }
@@ -309,6 +320,8 @@ mod tests {
 
     #[test]
     fn no_double_wrap() {
+        // Commands already containing "panda run" must not be wrapped again.
+        // Use a literal prefix since the binary path varies by environment.
         let result = rewrite_command("panda run git status");
         assert_eq!(result, None);
     }
@@ -317,8 +330,8 @@ mod tests {
     fn compound_and() {
         let result = rewrite_command("cargo build && git push");
         let r = result.expect("should be rewritten");
-        assert!(r.contains("panda run cargo build"), "cargo part: {}", r);
-        assert!(r.contains("panda run git push"), "git part: {}", r);
+        assert!(r.contains("run cargo build"), "cargo part: {}", r);
+        assert!(r.contains("run git push"), "git part: {}", r);
         assert!(r.contains(" && "), "should preserve && operator: {}", r);
     }
 
@@ -326,7 +339,9 @@ mod tests {
     fn compound_mixed() {
         // Only known commands get wrapped; git status gets --porcelain injected
         let result = rewrite_command("some-tool && git status");
-        assert_eq!(result, Some("some-tool && panda run git status --porcelain".to_string()));
+        let r = result.expect("should rewrite the git part");
+        assert!(r.starts_with("some-tool &&"), "should preserve unknown tool: {}", r);
+        assert!(r.contains("run git status --porcelain"), "should wrap git: {}", r);
     }
 
     #[test]
@@ -410,8 +425,8 @@ mod tests {
         let result = rewrite_command("cargo build && git log | head -5");
         assert!(result.is_some(), "compound should still rewrite the non-piped part");
         let r = result.unwrap();
-        assert!(r.contains("panda run cargo build"), "cargo build should be wrapped");
-        assert!(!r.contains("panda run git log"), "piped git log must not be wrapped");
+        assert!(r.contains("run cargo build"), "cargo build should be wrapped");
+        assert!(!r.contains("run git log"), "piped git log must not be wrapped");
         assert!(r.contains("git log | head -5"), "piped part should pass through unchanged");
     }
 
@@ -427,7 +442,7 @@ mod tests {
         // git show without redirect should still be wrapped normally
         let result = rewrite_command("git show HEAD");
         assert!(result.is_some(), "should wrap git show without redirect");
-        assert!(result.unwrap().starts_with("panda run git show"));
+        assert!(result.unwrap().contains("run git show"));
     }
 
     // ── env prefix tests ──────────────────────────────────────────────────────
@@ -436,7 +451,8 @@ mod tests {
     fn env_prefix_single_var() {
         let result = rewrite_command("RUST_LOG=debug cargo build");
         let r = result.expect("should rewrite despite env prefix");
-        assert!(r.starts_with("RUST_LOG=debug panda run cargo build"), "got: {}", r);
+        assert!(r.starts_with("RUST_LOG=debug "), "should preserve env prefix: {}", r);
+        assert!(r.contains("run cargo build"), "should wrap cargo: {}", r);
         assert!(r.contains("--message-format"), "should still inject --message-format: {}", r);
     }
 
@@ -444,7 +460,8 @@ mod tests {
     fn env_prefix_multiple_vars() {
         let result = rewrite_command("CI=1 NODE_ENV=production npm install");
         let r = result.expect("should rewrite despite multiple env prefixes");
-        assert!(r.starts_with("CI=1 NODE_ENV=production panda run npm"), "got: {}", r);
+        assert!(r.starts_with("CI=1 NODE_ENV=production "), "should preserve env prefix: {}", r);
+        assert!(r.contains("run npm"), "should wrap npm: {}", r);
     }
 
     #[test]
@@ -473,8 +490,9 @@ mod tests {
     fn env_prefix_compound_command() {
         let result = rewrite_command("CI=1 cargo build && git status");
         let r = result.expect("should rewrite compound with env prefix");
-        assert!(r.contains("CI=1 panda run cargo build"), "cargo part: {}", r);
-        assert!(r.contains("panda run git status"), "git part: {}", r);
+        assert!(r.starts_with("CI=1 "), "should preserve env prefix: {}", r);
+        assert!(r.contains("run cargo build"), "cargo part: {}", r);
+        assert!(r.contains("run git status"), "git part: {}", r);
     }
 
     // ── quoted env prefix tests ───────────────────────────────────────────────
@@ -483,7 +501,7 @@ mod tests {
     fn env_prefix_quoted_double_value() {
         let result = rewrite_command("KEY=\"val with spaces\" cargo build");
         let r = result.expect("should rewrite despite quoted env value");
-        assert!(r.contains("panda run cargo build"), "got: {}", r);
+        assert!(r.contains("run cargo build"), "got: {}", r);
         assert!(r.contains("--message-format"), "should inject flag: {}", r);
     }
 
@@ -491,7 +509,7 @@ mod tests {
     fn env_prefix_quoted_single_value() {
         let result = rewrite_command("NODE_ENV='production mode' npm install");
         let r = result.expect("should rewrite despite single-quoted env value");
-        assert!(r.contains("panda run npm"), "got: {}", r);
+        assert!(r.contains("run npm"), "got: {}", r);
     }
 
     #[test]
@@ -525,50 +543,38 @@ mod tests {
 
     #[test]
     fn head_plain_file() {
-        assert_eq!(
-            rewrite_command("head src/main.rs"),
-            Some("panda run cat src/main.rs".to_string())
-        );
+        let r = rewrite_command("head src/main.rs").expect("should rewrite");
+        assert!(r.contains("run cat src/main.rs"), "got: {}", r);
     }
 
     #[test]
     fn head_numeric_flag() {
-        assert_eq!(
-            rewrite_command("head -20 src/main.rs"),
-            Some("panda run cat src/main.rs".to_string())
-        );
+        let r = rewrite_command("head -20 src/main.rs").expect("should rewrite");
+        assert!(r.contains("run cat src/main.rs"), "got: {}", r);
     }
 
     #[test]
     fn head_n_flag_with_space() {
-        assert_eq!(
-            rewrite_command("head -n 50 src/lib.rs"),
-            Some("panda run cat src/lib.rs".to_string())
-        );
+        let r = rewrite_command("head -n 50 src/lib.rs").expect("should rewrite");
+        assert!(r.contains("run cat src/lib.rs"), "got: {}", r);
     }
 
     #[test]
     fn head_lines_long_flag() {
-        assert_eq!(
-            rewrite_command("head --lines=30 README.md"),
-            Some("panda run cat README.md".to_string())
-        );
+        let r = rewrite_command("head --lines=30 README.md").expect("should rewrite");
+        assert!(r.contains("run cat README.md"), "got: {}", r);
     }
 
     #[test]
     fn tail_numeric_flag() {
-        assert_eq!(
-            rewrite_command("tail -20 src/main.rs"),
-            Some("panda run cat src/main.rs".to_string())
-        );
+        let r = rewrite_command("tail -20 src/main.rs").expect("should rewrite");
+        assert!(r.contains("run cat src/main.rs"), "got: {}", r);
     }
 
     #[test]
     fn tail_n_flag_with_space() {
-        assert_eq!(
-            rewrite_command("tail -n 10 src/lib.rs"),
-            Some("panda run cat src/lib.rs".to_string())
-        );
+        let r = rewrite_command("tail -n 10 src/lib.rs").expect("should rewrite");
+        assert!(r.contains("run cat src/lib.rs"), "got: {}", r);
     }
 
     #[test]
@@ -601,7 +607,7 @@ mod tests {
     fn head_in_compound_with_git() {
         let result = rewrite_command("head -50 src/main.rs && git status");
         let r = result.expect("compound should rewrite");
-        assert!(r.contains("panda run cat src/main.rs"), "head part: {}", r);
-        assert!(r.contains("panda run git status"), "git part: {}", r);
+        assert!(r.contains("run cat src/main.rs"), "head part: {}", r);
+        assert!(r.contains("run git status"), "git part: {}", r);
     }
 }
