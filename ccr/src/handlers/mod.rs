@@ -1,8 +1,11 @@
 pub mod aws;
+pub mod bazel;
 pub mod biome;
 pub mod brew;
 pub mod cargo;
 pub mod clippy;
+pub mod cmake;
+pub mod dotnet;
 pub mod json;
 pub mod log;
 pub mod curl;
@@ -36,6 +39,7 @@ pub mod prettier;
 pub mod prisma;
 pub mod ruff;
 pub mod stylelint;
+pub mod swift;
 pub mod turbo;
 pub mod uv;
 pub mod vite;
@@ -156,6 +160,11 @@ fn get_handler_exact(cmd: &str) -> Option<Box<dyn Handler>> {
         // File transfer / media
         "rsync" => Some(Box::new(rsync::RsyncHandler)),
         "ffmpeg" | "ffprobe" => Some(Box::new(ffmpeg::FfmpegHandler)),
+        // New language build tools
+        "swift" => Some(Box::new(swift::SwiftHandler)),
+        "dotnet" => Some(Box::new(dotnet::DotnetHandler)),
+        "cmake" => Some(Box::new(cmake::CmakeHandler)),
+        "bazel" => Some(Box::new(bazel::BazelHandler)),
         _ => None,
     }
 }
@@ -215,6 +224,16 @@ const STATIC_ALIASES: &[(&str, &str)] = &[
     // Cloud CLIs
     ("gcloud",      "aws"), // similar output pattern
     ("az",          "aws"),
+    // Swift variants
+    ("swift-build", "swift"),
+    ("swift-test",  "swift"),
+    // .NET CLI variants
+    ("dotnet-cli",  "dotnet"),
+    // CMake variants
+    ("cmake3",      "cmake"),
+    // Bazel variants
+    ("bazelisk",    "bazel"),
+    ("bzl",         "bazel"),
 ];
 
 fn get_handler_alias(cmd: &str) -> Option<Box<dyn Handler>> {
@@ -283,6 +302,10 @@ const HANDLER_REPS: &[(&str, &str)] = &[
     ("ruff check format lint python",   "ruff"),
     ("mypy type check error annotation","mypy"),
     ("nx run build test affected graph","nx"),
+    ("swift build test package run compile",         "swift"),
+    ("dotnet build test run restore publish",        "dotnet"),
+    ("cmake build configure generate compile make",  "cmake"),
+    ("bazel build test run query target action",     "bazel"),
 ];
 
 const BERT_THRESHOLD_HIGH: f32 = 0.70;  // Full handler (filter + rewrite_args)

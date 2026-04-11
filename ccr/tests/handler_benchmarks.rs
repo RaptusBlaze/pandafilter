@@ -12,10 +12,13 @@
 //! the true end-to-end savings a user gets after `panda init`.
 
 use panda::handlers::{
+    bazel::BazelHandler,
     biome::BiomeHandler,
     brew::BrewHandler,
     cargo::CargoHandler,
     clippy::ClippyHandler,
+    cmake::CmakeHandler,
+    dotnet::DotnetHandler,
     docker::DockerHandler,
     ember::EmberHandler,
     env::EnvHandler,
@@ -40,6 +43,7 @@ use panda::handlers::{
     pytest::PytestHandler,
     ruff::RuffHandler,
     stylelint::StylelintHandler,
+    swift::SwiftHandler,
     terraform::TerraformHandler,
     tsc::TscHandler,
     turbo::TurboHandler,
@@ -2678,4 +2682,230 @@ fn benchmark_nx_run_many() {
         "expected ≥70% savings on nx run-many output, got {:.0}%",
         savings_pct(in_tok, out_tok)
     );
+}
+
+// ─── New handler fixture generators ──────────────────────────────────────────
+
+/// `docker build` — classic 12-step build with verbose layer output.
+fn docker_build_output() -> String {
+    let mut out = String::new();
+    let steps = [
+        "FROM ubuntu:22.04",
+        "RUN apt-get update && apt-get install -y curl git build-essential",
+        "RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash -",
+        "RUN apt-get install -y nodejs",
+        "WORKDIR /app",
+        "COPY package*.json ./",
+        "RUN npm ci --only=production",
+        "COPY . .",
+        "RUN npm run build",
+        "EXPOSE 3000",
+        "ENV NODE_ENV=production",
+        "CMD [\"node\", \"dist/server.js\"]",
+    ];
+    for (i, step) in steps.iter().enumerate() {
+        out.push_str(&format!("Step {}/{} : {}\n", i + 1, steps.len(), step));
+        out.push_str(&format!(" ---> Running in {:012x}\n", (i + 1) as u64 * 0xabc123u64));
+        // Simulate verbose output per step
+        for j in 0..8 {
+            out.push_str(&format!("  layer output line {} for step {}\n", j, i + 1));
+        }
+        out.push_str(&format!("Removing intermediate container {:012x}\n", (i + 1) as u64 * 0xabc123u64));
+        out.push_str(&format!(" ---> {:064x}\n", (i + 1) as u64));
+    }
+    out.push_str("Successfully built sha256:abc123def456789abc123def456789\n");
+    out.push_str("Successfully tagged myapp:latest\n");
+    out
+}
+
+/// `git clone` — typical verbose output with progress.
+fn git_clone_output() -> String {
+    let mut out = String::new();
+    out.push_str("Cloning into 'my-awesome-project'...\n");
+    out.push_str("remote: Enumerating objects: 15234, done.\n");
+    out.push_str("remote: Counting objects: 100% (15234/15234), done.\n");
+    out.push_str("remote: Compressing objects: 100% (4521/4521), done.\n");
+    out.push_str("remote: Total 15234 (delta 9876), reused 14200 (delta 9200), pack-reused 0\n");
+    out.push_str("Receiving objects: 100% (15234/15234), 45.23 MiB | 12.34 MiB/s, done.\n");
+    out.push_str("Resolving deltas: 100% (9876/9876), done.\n");
+    out.push_str("Checking connectivity... done.\n");
+    out
+}
+
+/// `git merge` — fast-forward with statistics.
+fn git_merge_output() -> String {
+    let mut out = String::new();
+    out.push_str("Updating abc1234..def5678\n");
+    out.push_str("Fast-forward\n");
+    for i in 0..15 {
+        out.push_str(&format!(" src/module{}.rs | {} ++---\n", i, (i + 2) * 3));
+    }
+    out.push_str(" 15 files changed, 234 insertions(+), 89 deletions(-)\n");
+    out
+}
+
+/// `git checkout` — branch switch with working tree update.
+fn git_checkout_output() -> String {
+    let mut out = String::new();
+    out.push_str("Switched to branch 'feature/implement-oauth'\n");
+    out.push_str("Your branch is up to date with 'origin/feature/implement-oauth'.\n");
+    out
+}
+
+/// `swift build` — realistic output with many compilation lines.
+fn swift_build_output() -> String {
+    let mut out = String::new();
+    let modules = [
+        "ArgumentParser", "Crypto", "NIO", "NIOHTTP1", "NIOWebSocket",
+        "AsyncHTTPClient", "Logging", "Metrics", "Vapor", "Leaf",
+        "Fluent", "FluentSQLiteDriver", "JWT", "Redis", "Queues",
+    ];
+    for module in &modules {
+        for i in 0..8 {
+            out.push_str(&format!("Compiling {} {}{}.swift\n", module, module.to_lowercase(), i));
+        }
+        out.push_str(&format!("Merging module {}\n", module));
+    }
+    let sources = ["main", "routes", "configure", "entrypoint", "models/User",
+        "models/Post", "controllers/UserController", "controllers/PostController",
+        "middleware/AuthMiddleware", "services/EmailService"];
+    for src in &sources {
+        out.push_str(&format!("Compiling App {}.swift\n", src));
+    }
+    out.push_str("Build complete! (12.4s)\n");
+    out
+}
+
+/// `dotnet build` — realistic output with many project references.
+fn dotnet_build_output() -> String {
+    let mut out = String::new();
+    let projects = [
+        "MyApp.Core", "MyApp.Data", "MyApp.Services", "MyApp.Api",
+        "MyApp.Tests", "MyApp.Infrastructure", "MyApp.Shared",
+    ];
+    out.push_str("Microsoft (R) Build Engine version 17.8.3+195e7f5a3\n");
+    out.push_str("Copyright (C) Microsoft Corporation. All rights reserved.\n\n");
+    for project in &projects {
+        out.push_str(&format!("  Determining projects to restore for {}...\n", project));
+        out.push_str(&format!("  Restored /src/{}/{}.csproj (0.{}s).\n", project, project, projects.len()));
+    }
+    for project in &projects {
+        out.push_str(&format!("  {} -> /src/{}/bin/Debug/net8.0/{}.dll\n", project, project, project));
+    }
+    out.push_str("\nBuild succeeded.\n");
+    out.push_str("    0 Warning(s)\n");
+    out.push_str("    0 Error(s)\n\n");
+    out.push_str("Time Elapsed 00:00:08.34\n");
+    out
+}
+
+/// `cmake --build` — verbose build with many compilation units.
+fn cmake_build_output() -> String {
+    let mut out = String::new();
+    let srcs = [
+        "main.cpp", "utils.cpp", "config.cpp", "logger.cpp", "network.cpp",
+        "database.cpp", "auth.cpp", "cache.cpp", "metrics.cpp", "scheduler.cpp",
+        "worker.cpp", "handler.cpp", "router.cpp", "middleware.cpp", "server.cpp",
+        "client.cpp", "protocol.cpp", "serializer.cpp", "parser.cpp", "codec.cpp",
+    ];
+    let total = srcs.len();
+    for (i, src) in srcs.iter().enumerate() {
+        let pct = (i + 1) * 100 / total;
+        out.push_str(&format!("[ {:>2}%] Building CXX object CMakeFiles/myapp.dir/src/{}.o\n", pct, src));
+        out.push_str(&format!("make[1]: Entering directory '/project/build'\n"));
+        out.push_str(&format!("make[1]: Leaving directory '/project/build'\n"));
+    }
+    out.push_str("[100%] Linking CXX executable myapp\n");
+    out.push_str("[100%] Built target myapp\n");
+    out
+}
+
+/// `bazel build` — typical bazel build output.
+fn bazel_build_output() -> String {
+    let mut out = String::new();
+    out.push_str("INFO: Analyzed target //app:server (127 packages loaded, 8934 targets configured).\n");
+    out.push_str("INFO: Found 1 target...\n");
+    out.push_str("INFO: From Compiling src/main.cc:\n");
+    out.push_str("INFO: From Compiling src/server.cc:\n");
+    out.push_str("INFO: From Compiling src/handler.cc:\n");
+    out.push_str("INFO: From Compiling src/router.cc:\n");
+    out.push_str("INFO: From Compiling src/database.cc:\n");
+    out.push_str("INFO: From Compiling src/auth.cc:\n");
+    out.push_str("INFO: From Compiling src/cache.cc:\n");
+    out.push_str("INFO: From Compiling src/logger.cc:\n");
+    out.push_str("INFO: From Compiling src/metrics.cc:\n");
+    out.push_str("INFO: From Linking app/server:\n");
+    out.push_str("INFO: Build completed successfully, 156 total actions\n");
+    out.push_str("INFO: Elapsed time: 18.234s, Critical Path: 6.789s\n");
+    out
+}
+
+// ─── New handler benchmarks ───────────────────────────────────────────────────
+
+#[test]
+fn benchmark_new_handlers() {
+    let docker  = DockerHandler;
+    let git     = GitHandler;
+    let swift   = SwiftHandler;
+    let dotnet  = DotnetHandler;
+    let cmake   = CmakeHandler;
+    let bazel   = BazelHandler;
+
+    let docker_build_raw  = docker_build_output();
+    let git_clone_raw     = git_clone_output();
+    let git_merge_raw     = git_merge_output();
+    let git_checkout_raw  = git_checkout_output();
+    let swift_build_raw   = swift_build_output();
+    let dotnet_build_raw  = dotnet_build_output();
+    let cmake_build_raw   = cmake_build_output();
+    let bazel_build_raw   = bazel_build_output();
+
+    struct Row { op: &'static str, in_tok: usize, out_tok: usize, min_pct: f64 }
+
+    macro_rules! row {
+        ($op:expr, $handler:expr, $input:expr, $args:expr, $min:expr) => {{
+            let a: Vec<String> = $args.iter().map(|s: &&str| s.to_string()).collect();
+            let out = $handler.filter(&$input, &a);
+            Row { op: $op, in_tok: count_tokens(&$input), out_tok: count_tokens(&out), min_pct: $min }
+        }};
+    }
+
+    let rows: Vec<Row> = vec![
+        row!("docker build",   docker, docker_build_raw,  &["docker","build","."],          95.0),
+        row!("git clone",      git,    git_clone_raw,     &["git","clone","..."],             85.0),
+        row!("git merge",      git,    git_merge_raw,     &["git","merge","feature"],         85.0),
+        row!("git checkout",   git,    git_checkout_raw,  &["git","checkout","main"],         50.0),
+        row!("swift build",    swift,  swift_build_raw,   &["swift","build"],                 93.0),
+        row!("dotnet build",   dotnet, dotnet_build_raw,  &["dotnet","build"],                94.0),
+        row!("cmake --build",  cmake,  cmake_build_raw,   &["cmake","--build","build/"],      94.0),
+        row!("bazel build",    bazel,  bazel_build_raw,   &["bazel","build","//..."],         92.0),
+    ];
+
+    println!();
+    println!("{:<30} {:>12} {:>10} {:>10}", "Operation", "Without Panda", "With Panda", "Savings");
+    println!("{}", "─".repeat(66));
+
+    let mut total_in  = 0usize;
+    let mut total_out = 0usize;
+
+    for row in &rows {
+        let pct = savings_pct(row.in_tok, row.out_tok);
+        println!("{:<30} {:>12} {:>10} {:>9.0}%", row.op, row.in_tok, row.out_tok, pct);
+        total_in  += row.in_tok;
+        total_out += row.out_tok;
+    }
+
+    println!("{}", "─".repeat(66));
+    let total_pct = savings_pct(total_in, total_out);
+    println!("{:<30} {:>12} {:>10} {:>9.0}%", "TOTAL", total_in, total_out, total_pct);
+    println!();
+
+    for row in &rows {
+        let pct = savings_pct(row.in_tok, row.out_tok);
+        assert!(
+            pct >= row.min_pct,
+            "Handler for '{}' saved only {:.0}% — expected ≥{:.0}%",
+            row.op, pct, row.min_pct
+        );
+    }
 }

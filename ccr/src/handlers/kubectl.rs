@@ -19,10 +19,13 @@ impl Handler for KubectlHandler {
             "get" => {
                 let resource = args.get(2).map(|s| s.as_str()).unwrap_or("");
                 let is_pods = resource == "pods" || resource == "pod";
+                let is_events = resource == "events" || resource == "event";
                 let has_all_ns = args.iter().any(|a| a == "--all-namespaces" || a == "-A");
                 // pod/name syntax: contains a slash
                 let is_specific = resource.contains('/');
-                if is_pods && !has_all_ns && !is_specific {
+                if is_events {
+                    filter_events(output)
+                } else if is_pods && !has_all_ns && !is_specific {
                     filter_get_pods(output)
                 } else {
                     filter_get(output)
@@ -31,6 +34,7 @@ impl Handler for KubectlHandler {
             "logs" => filter_logs(output),
             "describe" => filter_describe(output),
             "apply" | "delete" | "rollout" => filter_changes(output),
+            "events" | "event" => filter_events(output),
             _ => output.to_string(),
         }
     }
@@ -350,6 +354,102 @@ fn filter_changes(output: &str) -> String {
     }
 }
 
+const PROBLEM_REASONS: &[&str] = &[
+    "BackOff", "Failed", "Error", "Killed", "OOMKilling", "Unhealthy", "NodeNotReady",
+];
+
+const MAX_EVENTS: usize = 20;
+
+fn filter_events(output: &str) -> String {
+    let lines: Vec<&str> = output.lines().collect();
+    if lines.is_empty() {
+        return output.to_string();
+    }
+
+    let header_idx = match lines.iter().position(|l| !l.trim().is_empty()) {
+        Some(i) => i,
+        None => return output.to_string(),
+    };
+    let header = lines[header_idx];
+
+    // Find TYPE and REASON column positions from the header
+    let find_col_pos = |name: &str| -> Option<usize> {
+        let mut in_word = false;
+        let mut word_start = 0usize;
+        let mut buf = String::new();
+        for (i, c) in header.char_indices() {
+            if c != ' ' && !in_word {
+                word_start = i;
+                buf.clear();
+                in_word = true;
+            }
+            if in_word {
+                if c == ' ' {
+                    if buf.eq_ignore_ascii_case(name) {
+                        return Some(word_start);
+                    }
+                    in_word = false;
+                } else {
+                    buf.push(c);
+                }
+            }
+        }
+        if in_word && buf.eq_ignore_ascii_case(name) {
+            return Some(word_start);
+        }
+        None
+    };
+
+    let type_col = find_col_pos("TYPE");
+    let reason_col = find_col_pos("REASON");
+
+    let get_col_value = |line: &str, col_start: usize| -> String {
+        if col_start >= line.len() { return String::new(); }
+        line[col_start..].split_whitespace().next().unwrap_or("").to_string()
+    };
+
+    let data_lines: Vec<&str> = lines
+        .iter()
+        .skip(header_idx + 1)
+        .filter(|l| !l.trim().is_empty())
+        .copied()
+        .collect();
+
+    let mut warning_lines: Vec<String> = Vec::new();
+    for line in &data_lines {
+        let mut keep = false;
+        if let Some(tc) = type_col {
+            if get_col_value(line, tc) == "Warning" {
+                keep = true;
+            }
+        }
+        if !keep {
+            if let Some(rc) = reason_col {
+                let reason = get_col_value(line, rc);
+                if PROBLEM_REASONS.iter().any(|p| reason.contains(p)) {
+                    keep = true;
+                }
+            }
+        }
+        if keep {
+            warning_lines.push(line.to_string());
+        }
+    }
+
+    if warning_lines.is_empty() {
+        return "[no warning events]".to_string();
+    }
+
+    let total = warning_lines.len();
+    let mut out = vec![header.to_string()];
+    let shown = total.min(MAX_EVENTS);
+    out.extend_from_slice(&warning_lines[..shown]);
+    if total > MAX_EVENTS {
+        out.push(format!("[+{} more]", total - MAX_EVENTS));
+    }
+    out.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,5 +577,53 @@ pending-pod-abc123             0/1     Pending            0          10m
         let result = handler.filter(ALL_RUNNING_PODS, &args);
         // filter_get output should have column headers like NAME STATUS READY
         assert!(result.contains("NAME"), "should fall back to filter_get output");
+    }
+
+    // --- filter_events ---
+
+    const EVENTS_ALL_NORMAL: &str = "\
+LAST SEEN   TYPE     REASON    OBJECT          MESSAGE
+5m          Normal   Pulled    pod/my-app      Successfully pulled image
+3m          Normal   Started   pod/my-app      Started container app
+";
+
+    const EVENTS_WITH_WARNINGS: &str = "\
+LAST SEEN   TYPE      REASON      OBJECT          MESSAGE
+5m          Normal    Pulled      pod/my-app      Successfully pulled image
+2m          Warning   BackOff     pod/my-app      Back-off restarting failed container
+1m          Warning   Failed      pod/my-app      Failed to pull image
+";
+
+    #[test]
+    fn test_events_all_normal_returns_ok() {
+        let handler = KubectlHandler;
+        let args: Vec<String> = vec!["kubectl".into(), "events".into()];
+        let result = handler.filter(EVENTS_ALL_NORMAL, &args);
+        assert_eq!(result, "[no warning events]");
+    }
+
+    #[test]
+    fn test_events_warning_rows_kept_normal_dropped() {
+        let handler = KubectlHandler;
+        let args: Vec<String> = vec!["kubectl".into(), "events".into()];
+        let result = handler.filter(EVENTS_WITH_WARNINGS, &args);
+        assert!(result.contains("BackOff"), "should keep BackOff warning, got: {}", result);
+        assert!(result.contains("Failed"), "should keep Failed warning, got: {}", result);
+        assert!(!result.contains("Pulled"), "should drop Normal events, got: {}", result);
+    }
+
+    #[test]
+    fn test_events_capped_at_20() {
+        let mut input = "LAST SEEN   TYPE      REASON    OBJECT    MESSAGE\n".to_string();
+        for i in 0..25 {
+            input.push_str(&format!("{}m          Warning   BackOff   pod/{}   msg\n", i, i));
+        }
+        let handler = KubectlHandler;
+        let args: Vec<String> = vec!["kubectl".into(), "events".into()];
+        let result = handler.filter(&input, &args);
+        // header + 20 rows + overflow line
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 22, "expected 22 lines (header+20+overflow), got {}", lines.len());
+        assert!(result.contains("[+5 more]"), "got: {}", result);
     }
 }

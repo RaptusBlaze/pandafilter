@@ -52,6 +52,8 @@ impl Handler for DockerHandler {
             "logs" => filter_logs(output),
             "ps" => filter_ps(output),
             "images" => filter_images(output),
+            "build" => filter_build(output),
+            "up" => filter_build(output),
             _ => output.to_string(),
         }
     }
@@ -185,6 +187,53 @@ fn filter_images(output: &str) -> String {
     }
 
     out.join("\n")
+}
+
+fn filter_build(output: &str) -> String {
+    let lines: Vec<&str> = output.lines().collect();
+
+    // Short output — passthrough (safety valve)
+    if lines.len() <= 3 {
+        return output.to_string();
+    }
+
+    // Collect error lines
+    let error_lines: Vec<String> = lines
+        .iter()
+        .filter(|l| {
+            let t = l.trim();
+            t.starts_with("ERROR") || t.contains(": error") || t.contains(" error:") || t.starts_with("error ")
+        })
+        .map(|l| l.to_string())
+        .collect();
+
+    if !error_lines.is_empty() {
+        return error_lines.join("\n");
+    }
+
+    // Extract success markers
+    let mut success_hash: Option<String> = None;
+    let mut success_tag: Option<String> = None;
+    for line in &lines {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("Successfully built ") {
+            success_hash = Some(rest.trim().to_string());
+        }
+        if let Some(rest) = t.strip_prefix("Successfully tagged ") {
+            success_tag = Some(rest.trim().to_string());
+        }
+    }
+
+    if let Some(hash) = success_hash {
+        let mut result = format!("Build OK — {}", hash);
+        if let Some(tag) = success_tag {
+            result.push_str(&format!("\nTagged: {}", tag));
+        }
+        return result;
+    }
+
+    // No recognisable structure — passthrough
+    output.to_string()
 }
 
 #[cfg(test)]
@@ -361,5 +410,49 @@ redis                alpine    def789abc012  1 week ago    1 week ago    1 month
         let input = "REPOSITORY           TAG       SIZE\n";
         let result = filter_images(input);
         assert!(!result.contains("[total:"), "should not show total with no data rows");
+    }
+
+    // --- filter_build ---
+
+    #[test]
+    fn test_build_success_compresses_steps() {
+        let mut input = String::new();
+        for i in 1..=12 {
+            input.push_str(&format!("Step {}/12 : RUN apt-get update\n", i));
+            input.push_str(" ---> Running in abc123def456\n");
+            input.push_str("Removing intermediate container abc123def456\n");
+            input.push_str(&format!(" ---> sha256:step{}hash\n", i));
+        }
+        input.push_str("Successfully built sha256:abc123def456\n");
+        input.push_str("Successfully tagged myapp:latest\n");
+        let result = handler().filter(&input, &args(&["docker", "build", "."]));
+        assert!(result.contains("Build OK"), "got: {}", result);
+        assert!(result.contains("sha256:abc123def456"), "got: {}", result);
+        assert!(!result.contains("Step 1"), "Step lines should be dropped, got: {}", result);
+    }
+
+    #[test]
+    fn test_build_error_kept_steps_dropped() {
+        let mut input = String::new();
+        for i in 1..=6 {
+            input.push_str(&format!("Step {}/12 : RUN make\n", i));
+        }
+        input.push_str("ERROR: process \"/bin/sh -c make\" did not complete successfully\n");
+        let result = handler().filter(&input, &args(&["docker", "build", "."]));
+        assert!(result.contains("ERROR"), "got: {}", result);
+        assert!(!result.contains("Step 1"), "Step lines should be dropped, got: {}", result);
+    }
+
+    #[test]
+    fn test_build_empty_passthrough() {
+        let result = handler().filter("", &args(&["docker", "build", "."]));
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_build_no_double_compress_if_short() {
+        let input = "Step 1/2 : FROM ubuntu\n ---> abc123\n";
+        let result = handler().filter(input, &args(&["docker", "build", "."]));
+        assert_eq!(result, input);
     }
 }

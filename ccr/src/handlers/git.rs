@@ -81,6 +81,10 @@ impl Handler for GitHandler {
             "push" | "pull" | "fetch" => filter_push_pull(output),
             "commit" | "add" => filter_commit(output),
             "branch" | "stash" => filter_list(output),
+            "merge" => filter_merge(output),
+            "rebase" => filter_rebase(output),
+            "clone" => filter_clone(output),
+            "checkout" | "switch" => filter_checkout(output),
             _ => output.to_string(),
         }
     }
@@ -496,6 +500,163 @@ fn filter_list(output: &str) -> String {
     }
 }
 
+// ─── merge ───────────────────────────────────────────────────────────────────
+
+fn filter_merge(output: &str) -> String {
+    if output.contains("CONFLICT") {
+        let mut out: Vec<String> = Vec::new();
+        for line in output.lines() {
+            let t = line.trim();
+            if t.contains("CONFLICT") || t.contains("Automatic merge failed") {
+                out.push(line.to_string());
+            }
+        }
+        return if out.is_empty() { output.to_string() } else { out.join("\n") };
+    }
+    if output.contains("Already up to date") {
+        return "ok (already up to date)".to_string();
+    }
+    if output.contains("Fast-forward") {
+        return "ok (fast-forward)".to_string();
+    }
+    // Keep "Merge made by" line + diffstat line
+    let mut out: Vec<String> = Vec::new();
+    for line in output.lines() {
+        let t = line.trim();
+        if t.starts_with("Merge made by")
+            || (t.contains("file") && (t.contains("changed") || t.contains("insertion") || t.contains("deletion")))
+        {
+            out.push(line.to_string());
+        }
+    }
+    if out.is_empty() { output.to_string() } else { out.join("\n") }
+}
+
+// ─── rebase ──────────────────────────────────────────────────────────────────
+
+fn filter_rebase(output: &str) -> String {
+    if output.contains("CONFLICT") {
+        let mut out: Vec<String> = Vec::new();
+        for line in output.lines() {
+            let t = line.trim();
+            if t.contains("CONFLICT") || t.contains("could not apply") {
+                out.push(line.to_string());
+            }
+        }
+        return if out.is_empty() { output.to_string() } else { out.join("\n") };
+    }
+    if output.contains("Successfully rebased") {
+        for line in output.lines() {
+            if line.contains("Successfully rebased") {
+                return format!("ok — {}", line.trim());
+            }
+        }
+        return "ok — rebased".to_string();
+    }
+    if output.contains("is up to date") {
+        return "ok (already up to date)".to_string();
+    }
+    // Return last non-empty line
+    output
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.trim().to_string())
+        .unwrap_or_else(|| output.to_string())
+}
+
+// ─── clone ───────────────────────────────────────────────────────────────────
+
+const CLONE_NOISE_PREFIXES: &[&str] = &[
+    "remote: Enumerating", "remote: Counting", "remote: Compressing",
+    "Receiving objects:", "Resolving deltas:", "Checking connectivity",
+];
+
+fn filter_clone(output: &str) -> String {
+    let mut cloned_dir: Option<String> = None;
+    let mut error_lines: Vec<String> = Vec::new();
+
+    for line in output.lines() {
+        let t = line.trim();
+        if CLONE_NOISE_PREFIXES.iter().any(|p| t.starts_with(p)) {
+            continue;
+        }
+        if t.starts_with("Cloning into") {
+            if let Some(start) = t.find('\'') {
+                if let Some(end) = t[start + 1..].find('\'') {
+                    let dir = &t[start + 1..start + 1 + end];
+                    let dir_name = dir.split('/').last().unwrap_or(dir);
+                    cloned_dir = Some(dir_name.to_string());
+                }
+            }
+            continue;
+        }
+        if t.contains("error:") || t.contains("fatal:") || t.starts_with("ERROR") {
+            error_lines.push(line.to_string());
+        }
+    }
+
+    if !error_lines.is_empty() {
+        return error_lines.join("\n");
+    }
+    if let Some(dir) = cloned_dir {
+        return format!("ok — cloned '{}'", dir);
+    }
+    output.to_string()
+}
+
+// ─── checkout / switch ───────────────────────────────────────────────────────
+
+fn filter_checkout(output: &str) -> String {
+    // Check for errors first
+    let has_error = output.lines().any(|l| {
+        let t = l.trim();
+        t.contains("error:") || t.contains("Your local changes") || t.contains("Please commit")
+    });
+    if has_error {
+        return output.to_string();
+    }
+
+    for line in output.lines() {
+        let t = line.trim();
+        if t.starts_with("Switched to a new branch") {
+            if let (Some(s), Some(e)) = (t.find('\''), t.rfind('\'')) {
+                if s < e {
+                    let branch = &t[s + 1..e];
+                    return format!("ok — new branch '{}'", branch);
+                }
+            }
+            return format!("ok — {}", t);
+        }
+        if t.starts_with("Switched to branch") {
+            if let (Some(s), Some(e)) = (t.find('\''), t.rfind('\'')) {
+                if s < e {
+                    let branch = &t[s + 1..e];
+                    return format!("ok — switched to '{}'", branch);
+                }
+            }
+            return format!("ok — {}", t);
+        }
+        if t.starts_with("Already on") {
+            if let (Some(s), Some(e)) = (t.find('\''), t.rfind('\'')) {
+                if s < e {
+                    let branch = &t[s + 1..e];
+                    return format!("ok (already on '{}')", branch);
+                }
+            }
+            return "ok (already on branch)".to_string();
+        }
+    }
+
+    // Fallback: last non-empty line
+    output
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.trim().to_string())
+        .unwrap_or_else(|| output.to_string())
+}
+
 // ─── tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -696,5 +857,85 @@ mod tests {
         let result = filter_commit(output);
         assert!(result.starts_with("ok — [main abc1234]"), "got: {}", result);
         assert!(result.contains("2 files changed"), "got: {}", result);
+    }
+
+    // ─── clone ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_clone_strips_progress_keeps_dir() {
+        let output = "Cloning into 'my-repo'...\nremote: Enumerating objects: 100, done.\nremote: Counting objects: 100%\nReceiving objects: 100% (100/100), done.\nResolving deltas: 100%\n";
+        let result = filter_clone(output);
+        assert_eq!(result, "ok — cloned 'my-repo'");
+    }
+
+    #[test]
+    fn test_clone_error_kept() {
+        let output = "Cloning into 'repo'...\nfatal: repository 'https://example.com/repo.git' not found\n";
+        let result = filter_clone(output);
+        assert!(result.contains("fatal:"), "got: {}", result);
+    }
+
+    // ─── merge ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_merge_fast_forward_compressed() {
+        let output = "Updating abc..def\nFast-forward\n src/main.rs | 2 ++\n 1 file changed, 2 insertions(+)\n";
+        let result = filter_merge(output);
+        assert_eq!(result, "ok (fast-forward)");
+    }
+
+    #[test]
+    fn test_merge_conflict_kept() {
+        let output = "Auto-merging src/main.rs\nCONFLICT (content): Merge conflict in src/main.rs\nAutomatic merge failed; fix conflicts and then commit.\n";
+        let result = filter_merge(output);
+        assert!(result.contains("CONFLICT"), "got: {}", result);
+        assert!(result.contains("Automatic merge failed"), "got: {}", result);
+    }
+
+    // ─── rebase ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_rebase_success_compressed() {
+        let output = "Successfully rebased and updated refs/heads/feature.\n";
+        let result = filter_rebase(output);
+        assert!(result.starts_with("ok —"), "got: {}", result);
+        assert!(result.contains("rebased"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_rebase_conflict_kept() {
+        let output = "CONFLICT (content): Merge conflict in src/lib.rs\ncould not apply abc1234... some commit\n";
+        let result = filter_rebase(output);
+        assert!(result.contains("CONFLICT"), "got: {}", result);
+    }
+
+    // ─── checkout / switch ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_checkout_existing_branch() {
+        let output = "Switched to branch 'main'\nYour branch is up to date with 'origin/main'.\n";
+        let result = filter_checkout(output);
+        assert_eq!(result, "ok — switched to 'main'");
+    }
+
+    #[test]
+    fn test_checkout_new_branch() {
+        let output = "Switched to a new branch 'feature/my-feature'\n";
+        let result = filter_checkout(output);
+        assert_eq!(result, "ok — new branch 'feature/my-feature'");
+    }
+
+    #[test]
+    fn test_checkout_error_kept() {
+        let output = "error: Your local changes to the following files would be overwritten by checkout:\n\tsrc/main.rs\nPlease commit your changes or stash them before you switch branches.\n";
+        let result = filter_checkout(output);
+        assert!(result.contains("error:"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_switch_compressed() {
+        let output = "Switched to branch 'develop'\n";
+        let result = filter_checkout(output);
+        assert_eq!(result, "ok — switched to 'develop'");
     }
 }

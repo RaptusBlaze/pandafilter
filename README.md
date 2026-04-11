@@ -64,7 +64,13 @@ Numbers from `ccr/tests/handler_benchmarks.rs`. Run `cargo test -p panda benchma
 | `pip install` | 1,787 | 9 | **−99%** |
 | `uv sync` | 1,574 | 15 | **−99%** |
 | `playwright test` | 1,367 | 19 | **−99%** |
+| `docker build` | 1,801 | 24 | **−99%** |
+| `swift build` | 1,218 | 9 | **−99%** |
+| `dotnet build` | 438 | 3 | **−99%** |
+| `cmake` | 850 | 5 | **−99%** |
 | `gradle build` | 803 | 17 | **−98%** |
+| `git clone` | 139 | 8 | **−94%** |
+| `bazel build` | 150 | 12 | **−92%** |
 | `go test` | 4,507 | 148 | **−97%** |
 | `pytest` | 3,818 | 162 | **−96%** |
 | `terraform plan` | 3,926 | 163 | **−96%** |
@@ -74,6 +80,7 @@ Numbers from `ccr/tests/handler_benchmarks.rs`. Run `cargo test -p panda benchma
 | `cargo test` | 2,782 | 174 | **−94%** |
 | `next build` | 549 | 53 | **−90%** |
 | `cargo clippy` | 786 | 93 | **−88%** |
+| `git merge` | 164 | 5 | **−97%** |
 | `make` | 545 | 72 | **−87%** |
 | `git push` | 173 | 24 | **−86%** |
 | `ls` | 691 | 102 | **−85%** |
@@ -101,7 +108,7 @@ Numbers from `ccr/tests/handler_benchmarks.rs`. Run `cargo test -p panda benchma
 | `tsc` | 2,598 | 1,320 | −49% |
 | `mypy` | 2,053 | 1,088 | −47% |
 | `stylelint` | 1,100 | 845 | −23% |
-| **Total** | **73,104** | **15,985** | **−78%** |
+| **Total** | **81,882** | **16,062** | **−80%** |
 
 ---
 
@@ -157,9 +164,9 @@ panda proxy git status                  # run raw (no filtering), record analyti
 ---
 
 <details>
-<summary><strong>Handlers (51 handlers)</strong></summary>
+<summary><strong>Handlers (59 handlers)</strong></summary>
 
-51 handlers (60+ command aliases) in `ccr/src/handlers/`. Lookup cascade:
+59 handlers (70+ command aliases) in `ccr/src/handlers/`. Lookup cascade:
 
 1. **User filters** — `.panda/filters.toml` or `~/.config/panda/filters.toml`
 2. **Exact match** — direct command name
@@ -169,7 +176,7 @@ panda proxy git status                  # run raw (no filtering), record analyti
 | Handler | Keys | Key behavior |
 |---------|------|-------------|
 | **cargo** | `cargo` | `build`/`clippy`: errors (capped at 15) + warning count. `test`: failures + summary. `nextest run`: FAIL lines + Summary. |
-| **git** | `git` | `status`: counts. `log`: `--oneline`, cap 50 with total. `diff`: 2 context lines, 200-line cap. |
+| **git** | `git` | `status`: counts. `log`: `--oneline`, cap 50 with total. `diff`: 2 context lines, 200-line cap. `clone`/`merge`/`checkout`/`rebase`: compressed success or full conflict output. |
 | **go** | `go` | `test`: NDJSON streaming, FAIL blocks + summary. `build`: errors only. |
 | **ember** | `ember` | `build`: errors + summary; drops fingerprint/asset spam. `test`: failures + summary. `serve`: serving URL only. |
 | **tsc** | `tsc` | Errors grouped by file; deduplicates repeated TS codes. `Build OK` on clean. Injects `--noEmit`. |
@@ -194,12 +201,12 @@ panda proxy git status                  # run raw (no filtering), record analyti
 | **nx** | `nx`, `npx nx` | Passing tasks collapsed to `[N tasks passed]`; failing task output kept. |
 | **stylelint** | `stylelint` | Issues grouped by file, caps at 40 + `[+N more]`. |
 | **biome** | `biome` | Code context snippets stripped; keeps file:line, rule, message. |
-| **kubectl** | `kubectl`, `k` | `get pods`: aggregates to `[N pods, all running]` or problem-pods table with counts. Smart column selection, log anomaly scoring, describe key sections. |
-| **terraform** | `terraform`, `tofu` | `plan`: `+`/`-`/`~` + summary. `validate`: short-circuits on success. |
+| **kubectl** | `kubectl`, `k` | `get pods`: aggregates to `[N pods, all running]` or problem-pods table with counts. Smart column selection, log anomaly scoring, describe key sections. `events`: warning-only, capped at 20. |
+| **terraform** | `terraform`, `tofu` | `plan`: `+`/`-`/`~` + summary. `validate`: short-circuits on success. `output`: compact key=value. `state list`: capped at 50. |
 | **aws** | `aws`, `gcloud`, `az` | Resource extraction; `--output json` injected for read-only actions. |
 | **gh** | `gh` | Compact tables for list commands; strips HTML from `pr view`. |
 | **helm** | `helm` | `list`: compact table. `status`/`diff`/`template`: structured. |
-| **docker** | `docker` | `logs`: ANSI strip + BERT. `ps`/`images`: formatted tables + total size. |
+| **docker** | `docker` | `logs`: ANSI strip + BERT. `ps`/`images`: formatted tables + total size. `build`: errors + final image ID. |
 | **make** | `make`, `ninja` | "Nothing to be done" short-circuit; keeps errors. Injects `--no-print-directory`. |
 | **golangci-lint** | `golangci-lint` | Diagnostics grouped by file; runner noise dropped. Detects v1 text and v2 JSON formats. |
 | **prisma** | `prisma` | `generate`/`migrate`/`db push` structured summaries. |
@@ -222,6 +229,10 @@ panda proxy git status                  # run raw (no filtering), record analyti
 | **rsync** | `rsync` | Drops per-file transfer progress lines (`to-chk=`, `MB/s`); keeps file list and final summary. |
 | **ffmpeg** | `ffmpeg`, `ffprobe` | Drops `frame=` and `size=` real-time progress lines; keeps input/output codec info and final size line. |
 | **wget** | `wget` | Injects `--quiet` if no verbosity flag set. |
+| **swift** | `swift`, `swift-build`, `swift-test` | `build`: errors/warnings + `Build complete`. `test`: failures + summary. `package resolve`: strips progress. |
+| **dotnet** | `dotnet`, `dotnet-cli` | `build`: errors grouped by CS code + summary. Short-circuits on clean build. `test`: failures + summary. `restore`: package count. |
+| **cmake** | `cmake`, `cmake3` | `configure`: errors + final written-to line. `--build`: errors + `[N targets built]`. Auto-detects mode from args/output. |
+| **bazel** | `bazel`, `bazelisk`, `bzl` | `build`: errors + completion summary `[N actions, build OK (Xs)]`. `test`: failures + `[N passed, N failed]`. `query`: cap at 30 targets. |
 
 </details>
 
