@@ -9,7 +9,7 @@ pub mod query;
 pub mod symbols;
 pub mod assembler;
 
-pub use graph::{open_readwrite, open_readonly, is_valid as graph_is_valid};
+pub use graph::{open_readwrite, open_readonly, is_valid as graph_is_valid, update_embedding};
 pub use indexer::{run_index, Meta};
-pub use query::{query, RankedFile};
+pub use query::{query, query_with_read_boosts, RankedFile};
 pub use assembler::{assemble, GuidanceOutput, FileEntry};

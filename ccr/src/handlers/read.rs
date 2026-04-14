@@ -7,6 +7,7 @@ pub enum ReadLevel {
     Auto,        // use auto_level() to pick level based on file size + extension
     Strip,       // strip comments + normalize blank lines
     Aggressive,  // imports + signatures + type defs only
+    Structural,  // signatures with nesting context, collapsed bodies
 }
 
 /// Unit-struct kept for backward compatibility with `mod.rs` (`"cat"` handler).
@@ -348,6 +349,203 @@ fn apply_aggressive(lines: &[&str], lang: &Language) -> Vec<String> {
     result
 }
 
+/// Structural mode: keep all signatures with their nesting context,
+/// collapse function bodies to `{ /* N lines */ }`, preserve type definitions fully,
+/// and keep doc comments for public items.
+fn apply_structural(lines: &[&str], lang: &Language) -> Vec<String> {
+    // DataFormat and Shell/Unknown fall back to Strip
+    match lang {
+        Language::DataFormat | Language::Shell | Language::Unknown => {
+            return apply_strip(lines, lang);
+        }
+        _ => {}
+    }
+
+    // Python: indentation-based structural mode
+    if *lang == Language::Python {
+        return apply_structural_python(lines);
+    }
+
+    // Brace-based languages (Rust, Go, TS, Java, C#, C++)
+    let mut result: Vec<String> = Vec::new();
+    let mut depth: i32 = 0;
+    let mut body_start: Option<usize> = None; // line index where body started
+    let mut body_depth: i32 = 0; // depth at which the body opened
+    let mut collecting_doc = false;
+    let mut doc_lines: Vec<String> = Vec::new();
+
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+
+        // Track doc comments (/// or /** for Rust/Java/TS, // for Go)
+        let is_doc = trimmed.starts_with("///")
+            || trimmed.starts_with("/**")
+            || trimmed.starts_with("* ")
+            || trimmed.starts_with("*/");
+
+        if is_doc && body_start.is_none() {
+            collecting_doc = true;
+            doc_lines.push(line.to_string());
+            continue;
+        }
+
+        let opens = line.chars().filter(|&c| c == '{').count() as i32;
+        let closes = line.chars().filter(|&c| c == '}').count() as i32;
+
+        if body_start.is_some() {
+            // We're inside a body we're collapsing
+            depth += opens - closes;
+            if depth < 0 { depth = 0; }
+
+            if depth <= body_depth {
+                // Body ended — emit collapse marker
+                let body_lines = i.saturating_sub(body_start.unwrap());
+                if body_lines > 0 {
+                    result.push(format!("{}/* {} lines */", " ".repeat(body_depth as usize * 4 + 4), body_lines));
+                }
+                result.push(line.to_string()); // the closing brace
+                body_start = None;
+                collecting_doc = false;
+                doc_lines.clear();
+            }
+            continue;
+        }
+
+        // At this point we're outside a collapsed body
+        if is_signature_line(trimmed, lang) || depth == 0 {
+            // Emit any accumulated doc comments for public items
+            if collecting_doc && (trimmed.starts_with("pub ") || trimmed.starts_with("export ")) {
+                for dl in &doc_lines {
+                    result.push(dl.clone());
+                }
+            }
+            collecting_doc = false;
+            doc_lines.clear();
+
+            // Type definitions: keep fully (struct/enum/interface bodies are short and critical)
+            let is_type_def = trimmed.starts_with("struct ")
+                || trimmed.starts_with("pub struct ")
+                || trimmed.starts_with("enum ")
+                || trimmed.starts_with("pub enum ")
+                || trimmed.starts_with("interface ")
+                || trimmed.starts_with("export interface ")
+                || trimmed.starts_with("type ")
+                || trimmed.starts_with("pub type ");
+
+            if is_type_def {
+                result.push(line.to_string());
+                depth += opens - closes;
+                if depth < 0 { depth = 0; }
+                // Don't collapse type bodies — keep them fully
+                continue;
+            }
+
+            result.push(line.to_string());
+            depth += opens - closes;
+            if depth < 0 { depth = 0; }
+
+            // If this signature opened a body (has { but didn't close it),
+            // start collapsing the body
+            let is_fn_like = trimmed.starts_with("fn ")
+                || trimmed.starts_with("pub fn ")
+                || trimmed.starts_with("pub(crate) fn ")
+                || trimmed.starts_with("async fn ")
+                || trimmed.starts_with("pub async fn ")
+                || trimmed.starts_with("func ")
+                || trimmed.starts_with("function ")
+                || trimmed.starts_with("export function ")
+                || trimmed.starts_with("export async function ")
+                || trimmed.contains("=> {");
+
+            if is_fn_like && opens > closes {
+                body_start = Some(i);
+                body_depth = depth - (opens - closes); // depth before the opening brace
+            }
+        } else {
+            // Inside a non-collapsed block at depth > 0 (e.g. impl block items)
+            result.push(line.to_string());
+            depth += opens - closes;
+            if depth < 0 { depth = 0; }
+
+            // Check if this line starts a function body inside an impl/class
+            let is_fn_like = trimmed.starts_with("fn ")
+                || trimmed.starts_with("pub fn ")
+                || trimmed.starts_with("pub(crate) fn ")
+                || trimmed.starts_with("async fn ")
+                || trimmed.starts_with("pub async fn ");
+
+            if is_fn_like && opens > closes {
+                body_start = Some(i);
+                body_depth = depth - (opens - closes);
+            }
+        }
+    }
+
+    result
+}
+
+/// Structural mode for Python: keep class/def signatures with indentation context,
+/// collapse function bodies.
+fn apply_structural_python(lines: &[&str]) -> Vec<String> {
+    let mut result: Vec<String> = Vec::new();
+    let mut i = 0;
+
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        let indent = lines[i].len() - lines[i].trim_start().len();
+
+        // Keep imports, class definitions, decorators
+        if trimmed.starts_with("import ")
+            || trimmed.starts_with("from ")
+            || trimmed.starts_with("class ")
+            || trimmed.starts_with('@')
+        {
+            result.push(lines[i].to_string());
+            i += 1;
+            continue;
+        }
+
+        // Function/method definition: keep signature, collapse body
+        if trimmed.starts_with("def ") || trimmed.starts_with("async def ") {
+            result.push(lines[i].to_string());
+            let body_indent = indent + 4;
+            let body_start = i + 1;
+            i += 1;
+
+            // Skip body lines (same or deeper indentation)
+            while i < lines.len() {
+                let next_trimmed = lines[i].trim();
+                let next_indent = lines[i].len() - lines[i].trim_start().len();
+                if next_trimmed.is_empty() {
+                    i += 1;
+                    continue;
+                }
+                if next_indent >= body_indent {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+
+            let body_lines = i.saturating_sub(body_start);
+            if body_lines > 0 {
+                let pad = " ".repeat(body_indent);
+                result.push(format!("{}# ... {} lines ...", pad, body_lines));
+            }
+            continue;
+        }
+
+        // Top-level assignments and other statements: keep
+        if indent == 0 && !trimmed.is_empty() {
+            result.push(lines[i].to_string());
+        }
+
+        i += 1;
+    }
+
+    result
+}
+
 fn head_tail(lines: &[String]) -> String {
     let n = lines.len();
     let head = &lines[..60.min(n)];
@@ -410,6 +608,7 @@ impl ReadHandlerLevel {
             ReadMode::Auto        => ReadLevel::Auto,
             ReadMode::Strip       => ReadLevel::Strip,
             ReadMode::Aggressive  => ReadLevel::Aggressive,
+            ReadMode::Structural  => ReadLevel::Structural,
         };
         Self { level }
     }
@@ -441,6 +640,10 @@ impl Handler for ReadHandlerLevel {
             }
             ReadLevel::Aggressive => {
                 let extracted = apply_aggressive(&lines, &lang);
+                extracted.join("\n")
+            }
+            ReadLevel::Structural => {
+                let extracted = apply_structural(&lines, &lang);
                 extracted.join("\n")
             }
         }
@@ -672,6 +875,7 @@ mod tests {
         assert_eq!(ReadHandlerLevel::from_read_mode(&ReadMode::Auto).level,        ReadLevel::Auto);
         assert_eq!(ReadHandlerLevel::from_read_mode(&ReadMode::Strip).level,       ReadLevel::Strip);
         assert_eq!(ReadHandlerLevel::from_read_mode(&ReadMode::Aggressive).level,  ReadLevel::Aggressive);
+        assert_eq!(ReadHandlerLevel::from_read_mode(&ReadMode::Structural).level,  ReadLevel::Structural);
     }
 
     #[test]

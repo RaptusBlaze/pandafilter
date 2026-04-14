@@ -46,6 +46,7 @@ pub enum ReadMode {
     Auto,        // use auto_level() (>300→Aggressive, >100→Strip, else Passthrough)
     Strip,
     Aggressive,
+    Structural,  // signatures with nesting context, collapsed bodies
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

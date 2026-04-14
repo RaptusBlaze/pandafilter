@@ -21,6 +21,8 @@ use super::graph;
 pub const MAX_FILE_SIZE_BYTES: u64 = 500 * 1024;
 pub const MAX_COCHANGE_FILES_PER_COMMIT: usize = 50;
 pub const LRU_KEEP_COUNT: usize = 5;
+const EMBED_BATCH_SIZE: usize = 64;
+const EMBED_CONTENT_CHARS: usize = 1000;
 
 /// Directory names that are always skipped during full builds.
 const SKIP_DIRS: &[&str] = &[
@@ -275,12 +277,103 @@ pub fn run_index(repo_root: &Path, index_parent: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Classify a file's role from its path.
+/// Returns (role, confidence) where role is one of:
+/// entry_point, test, persistence, state_manager, config, general.
+pub fn classify_role(path: &str) -> (&'static str, f64) {
+    let lower = path.to_lowercase();
+    let basename = std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    // Entry points
+    if matches!(
+        basename.as_str(),
+        "main.rs" | "main.py" | "main.go" | "main.ts" | "main.js"
+            | "index.ts" | "index.js" | "index.tsx" | "index.jsx"
+            | "app.py" | "app.ts" | "app.js" | "app.rs"
+    ) || basename.starts_with("server.")
+        || lower.contains("/cmd/")
+        || lower.contains("/bin/")
+    {
+        return ("entry_point", 0.9);
+    }
+
+    // Tests
+    if basename.ends_with("_test.rs")
+        || basename.ends_with("_test.go")
+        || basename.ends_with("_test.py")
+        || basename.ends_with("_spec.ts")
+        || basename.ends_with("_spec.js")
+        || basename.ends_with(".test.ts")
+        || basename.ends_with(".test.js")
+        || basename.starts_with("test_")
+        || lower.contains("/tests/")
+        || lower.contains("/test/")
+        || lower.contains("/spec/")
+    {
+        return ("test", 0.9);
+    }
+
+    // Persistence
+    if lower.contains("db")
+        || lower.contains("migration")
+        || lower.contains("schema")
+        || lower.contains("model")
+        || lower.contains("repository")
+    {
+        return ("persistence", 0.8);
+    }
+
+    // State manager
+    if lower.contains("store")
+        || lower.contains("state")
+        || lower.contains("reducer")
+        || lower.contains("context")
+    {
+        return ("state_manager", 0.7);
+    }
+
+    // Config
+    if basename.ends_with(".toml")
+        || basename.ends_with(".yaml")
+        || basename.ends_with(".yml")
+        || basename.contains(".env")
+        || basename.starts_with("config.")
+    {
+        return ("config", 0.7);
+    }
+
+    ("general", 0.5)
+}
+
+/// Convert a Vec<f32> embedding to a little-endian byte blob for SQLite storage.
+fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
+    embedding
+        .iter()
+        .flat_map(|f| f.to_le_bytes())
+        .collect()
+}
+
+/// A file collected during the walk, before embedding.
+struct FileRecord {
+    rel_path: String,
+    role: &'static str,
+    role_confidence: f64,
+    embed_text: String,
+}
+
 fn full_build(repo_root: &Path, conn: &rusqlite::Connection) -> Result<()> {
     let walker = walkdir::WalkDir::new(repo_root)
         .into_iter()
         .filter_map(|e| e.ok());
 
     let epoch = now_secs();
+
+    // Collect all files first, then batch-embed
+    let mut files: Vec<FileRecord> = Vec::new();
 
     for entry in walker {
         let path = entry.path();
@@ -318,20 +411,45 @@ fn full_build(repo_root: &Path, conn: &rusqlite::Connection) -> Result<()> {
         };
         let rel_str = rel.to_string_lossy().to_string();
 
-        // Read file content (currently unused, will be needed for embedding)
-        let _content = match fs::read_to_string(path) {
+        let content = match fs::read_to_string(path) {
             Ok(c) => c,
             Err(_) => continue,
         };
 
-        // For now, just insert empty embedding (will be filled in by actual indexing)
-        // Full embedding integration will come in next phase
-        conn.execute(
-            "INSERT OR REPLACE INTO files
-             (path, role, role_confidence, commit_count, updated_at, symbols, signatures, embedding)
-             VALUES (?1, 'general', 0.5, 0, ?2, '', '', x'')",
-            rusqlite::params![rel_str, epoch as i64],
-        )?;
+        let (role, role_confidence) = classify_role(&rel_str);
+
+        // Build embedding input: filename + first N chars of content
+        let content_prefix: String = content.chars().take(EMBED_CONTENT_CHARS).collect();
+        let embed_text = format!("{}\n{}", rel_str, content_prefix);
+
+        files.push(FileRecord {
+            rel_path: rel_str,
+            role,
+            role_confidence,
+            embed_text,
+        });
+    }
+
+    // Batch-embed files in chunks of EMBED_BATCH_SIZE
+    for chunk in files.chunks(EMBED_BATCH_SIZE) {
+        let texts: Vec<&str> = chunk.iter().map(|f| f.embed_text.as_str()).collect();
+
+        let embeddings = crate::summarizer::embed_batch(&texts).unwrap_or_default();
+
+        for (i, file) in chunk.iter().enumerate() {
+            let blob = if i < embeddings.len() {
+                embedding_to_blob(&embeddings[i])
+            } else {
+                Vec::new() // fallback: empty embedding if batch failed
+            };
+
+            conn.execute(
+                "INSERT OR REPLACE INTO files
+                 (path, role, role_confidence, commit_count, updated_at, symbols, signatures, embedding)
+                 VALUES (?1, ?2, ?3, 0, ?4, '', '', ?5)",
+                rusqlite::params![file.rel_path, file.role, file.role_confidence, epoch as i64, blob],
+            )?;
+        }
     }
 
     Ok(())

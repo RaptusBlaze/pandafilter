@@ -45,6 +45,15 @@ pub struct SessionState {
     /// vs what a normal run of this command always produces.
     #[serde(default)]
     pub command_centroids: std::collections::HashMap<String, Vec<f32>>,
+    /// 3.2: Paragraph-level embeddings of recently read file sections.
+    /// Used for cross-file dedup — sections with >0.8 similarity to already-read
+    /// content get collapsed to zoom blocks.
+    #[serde(default)]
+    pub read_section_embeddings: Vec<Vec<f32>>,
+    /// 3.3: Recent edit locations per file (file_path → Vec<(start_line, end_line)>).
+    /// Used to preserve context around recently-edited areas during re-reads.
+    #[serde(default)]
+    pub recent_edits: std::collections::HashMap<String, Vec<(usize, usize)>>,
 }
 
 pub struct SessionHit {
@@ -438,6 +447,56 @@ impl SessionState {
             .rev()
             .map(|e| (e.turn, e.content_preview.clone()))
             .collect()
+    }
+}
+
+// ── Cross-file dedup (3.2) ────────────────────────────────────────────────
+
+impl SessionState {
+    /// Store paragraph-level embeddings from a recently read file.
+    /// Keeps at most 200 section embeddings (FIFO eviction).
+    pub fn add_read_section_embeddings(&mut self, embeddings: Vec<Vec<f32>>) {
+        const MAX_SECTIONS: usize = 200;
+        self.read_section_embeddings.extend(embeddings);
+        let overflow = self.read_section_embeddings.len().saturating_sub(MAX_SECTIONS);
+        if overflow > 0 {
+            self.read_section_embeddings.drain(..overflow);
+        }
+    }
+
+    /// Check if a section embedding is similar (>threshold) to any stored read section.
+    pub fn is_section_seen(&self, emb: &[f32], threshold: f32) -> bool {
+        self.read_section_embeddings
+            .iter()
+            .any(|stored| cosine_sim(emb, stored) >= threshold)
+    }
+}
+
+// ── Edit tracking (3.3) ──────────────────────────────────────────────────
+
+impl SessionState {
+    /// Record that lines [start..end] of `file_path` were recently edited.
+    /// Keeps at most 10 edit ranges per file (newest first).
+    pub fn record_edit(&mut self, file_path: &str, start_line: usize, end_line: usize) {
+        let ranges = self.recent_edits.entry(file_path.to_string()).or_default();
+        ranges.push((start_line, end_line));
+        if ranges.len() > 10 {
+            ranges.remove(0);
+        }
+    }
+
+    /// Get the set of line ranges that should be preserved uncompressed for a file.
+    /// Returns ranges expanded by `context` lines on each side.
+    pub fn edit_preserve_ranges(&self, file_path: &str, context: usize) -> Vec<(usize, usize)> {
+        self.recent_edits
+            .get(file_path)
+            .map(|ranges| {
+                ranges
+                    .iter()
+                    .map(|(s, e)| (s.saturating_sub(context), e + context))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 

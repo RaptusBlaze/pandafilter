@@ -41,6 +41,7 @@ pub fn process(input: &str) -> Result<Option<String>> {
 
     match hook_input.tool_name.as_str() {
         "Read" => process_read(hook_input),
+        "Edit" => process_edit(hook_input),
         "Glob" => process_glob(hook_input),
         "Grep" => process_grep(hook_input),
         _ => process_bash(hook_input), // Bash and unknown tools
@@ -484,14 +485,27 @@ fn process_read(hook_input: HookInput) -> Result<Option<String>> {
 
     let _ = crate::zoom_store::save_blocks(&sid, result.zoom_blocks);
 
+    // 3.3: Edit-aware compression — preserve context around recently-edited areas
+    let pipeline_output = {
+        let preserve_ranges = session.edit_preserve_ranges(&file_path, 20);
+        if !preserve_ranges.is_empty() {
+            apply_edit_aware_compression(&result.output, &preserve_ranges)
+        } else {
+            result.output
+        }
+    };
+
+    // 3.2: Cross-file dedup — collapse sections already seen in recently-read files
+    let pipeline_output = apply_cross_file_dedup(&pipeline_output, &mut session, &sid);
+
     // Session dedup using file_path as cmd_key.
     // Threshold scales by file size — see `read_dedup_threshold()`.
     let compressed = if let Ok(mut embs) =
-        panda_core::summarizer::embed_batch(&[result.output.as_str()])
+        panda_core::summarizer::embed_batch(&[pipeline_output.as_str()])
     {
         if let Some(emb) = embs.pop() {
-            let tokens = panda_core::tokens::count_tokens(&result.output);
-            let line_count = result.output.lines().count();
+            let tokens = panda_core::tokens::count_tokens(&pipeline_output);
+            let line_count = pipeline_output.lines().count();
             let threshold = read_dedup_threshold(line_count);
             if let Some(hit) = session.find_similar_with_threshold(&file_path, &emb, threshold) {
                 let age = crate::session::format_age(hit.age_secs);
@@ -500,15 +514,15 @@ fn process_read(hook_input: HookInput) -> Result<Option<String>> {
                     hit.turn, age, hit.tokens_saved
                 )
             } else {
-                session.record(&file_path, emb, tokens, &result.output, false, None);
+                session.record(&file_path, emb, tokens, &pipeline_output, false, None);
                 session.save(&sid);
-                result.output
+                pipeline_output
             }
         } else {
-            result.output
+            pipeline_output
         }
     } else {
-        result.output
+        pipeline_output
     };
 
     let input_tokens = panda_core::tokens::count_tokens(&output_text);
@@ -519,8 +533,56 @@ fn process_read(hook_input: HookInput) -> Result<Option<String>> {
     // Record this read in the session for focus precision tracking
     let _ = crate::analytics_db::record_session_read(&sid, &file_path, input_tokens);
 
+    // 2.3: Refresh focus graph embedding with the fresh pipeline embedding
+    refresh_focus_embedding(&file_path);
+
     let hook_output = HookOutput { output: compressed };
     Ok(Some(serde_json::to_string(&hook_output)?))
+}
+
+// ── Edit tool handler (3.3) ───────────────────────────────────────────────────
+
+/// Track Edit events in the session so that subsequent re-reads of the same
+/// file preserve context around the edited lines.
+fn process_edit(hook_input: HookInput) -> Result<Option<String>> {
+    let file_path = hook_input
+        .tool_input
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if file_path.is_empty() {
+        return Ok(None);
+    }
+
+    // Try to figure out which lines were edited from the old_string
+    // We can estimate the line range from the old_string content
+    let old_string = hook_input
+        .tool_input
+        .get("old_string")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if old_string.is_empty() {
+        return Ok(None);
+    }
+
+    // Find the line range of old_string in the file
+    if let Ok(content) = std::fs::read_to_string(&file_path) {
+        if let Some(byte_offset) = content.find(old_string) {
+            let start_line = content[..byte_offset].lines().count();
+            let edit_lines = old_string.lines().count();
+            let end_line = start_line + edit_lines;
+
+            let sid = crate::session::session_id();
+            let mut session = crate::session::SessionState::load(&sid);
+            session.record_edit(&file_path, start_line, end_line);
+            session.save(&sid);
+        }
+    }
+
+    Ok(None) // pass through — Edit output is not compressed
 }
 
 // ── Glob tool handler ─────────────────────────────────────────────────────────
@@ -779,6 +841,242 @@ fn strip_temporal_noise(text: &str) -> String {
         .expect("strip_temporal_noise regex")
     });
     re.replace_all(text, "").to_string()
+}
+
+// ── Cross-file dedup (3.2) ───────────────────────────────────────────────────
+
+/// Split output into paragraph-sized sections and collapse those already seen
+/// in recently-read files (cosine ≥ 0.80 against stored section embeddings).
+fn apply_cross_file_dedup(
+    output: &str,
+    session: &mut crate::session::SessionState,
+    sid: &str,
+) -> String {
+    const MIN_SECTION_LINES: usize = 5;
+    const SIMILARITY_THRESHOLD: f32 = 0.80;
+    const MAX_SUPPRESS_RATIO: f32 = 0.30;
+
+    if session.read_section_embeddings.is_empty() {
+        // No prior read sections to compare against — just store and return
+        store_section_embeddings(output, session, sid, MIN_SECTION_LINES);
+        return output.to_string();
+    }
+
+    let sections = segment_output(output, MIN_SECTION_LINES);
+    if sections.is_empty() {
+        store_section_embeddings(output, session, sid, MIN_SECTION_LINES);
+        return output.to_string();
+    }
+
+    let texts: Vec<&str> = sections.iter().map(|s| s.as_str()).collect();
+    let embeddings = match panda_core::summarizer::embed_batch(&texts) {
+        Ok(e) => e,
+        Err(_) => {
+            return output.to_string();
+        }
+    };
+
+    let total_lines = output.lines().count();
+    let mut suppressed_lines = 0usize;
+    let mut suppress: Vec<bool> = vec![false; sections.len()];
+
+    for (i, emb) in embeddings.iter().enumerate() {
+        if session.is_section_seen(emb, SIMILARITY_THRESHOLD) {
+            suppress[i] = true;
+            suppressed_lines += sections[i].lines().count();
+        }
+    }
+
+    // Guard: don't suppress more than MAX_SUPPRESS_RATIO
+    if suppressed_lines as f32 / total_lines.max(1) as f32 > MAX_SUPPRESS_RATIO {
+        // Store all section embeddings for future reads
+        session.add_read_section_embeddings(embeddings);
+        session.save(sid);
+        return output.to_string();
+    }
+
+    // Store section embeddings for future reads
+    session.add_read_section_embeddings(embeddings);
+    session.save(sid);
+
+    if suppress.iter().all(|s| !s) {
+        return output.to_string();
+    }
+
+    // Rebuild output with suppressed sections collapsed
+    let suppressed_map: std::collections::HashMap<&str, bool> = sections
+        .iter()
+        .zip(suppress.iter())
+        .filter(|(_, &s)| s)
+        .map(|(sec, _)| (sec.as_str(), true))
+        .collect();
+
+    let mut result_lines: Vec<String> = Vec::new();
+    let mut current_para: Vec<&str> = Vec::new();
+
+    for line in output.lines().chain(std::iter::once("")) {
+        if line.trim().is_empty() {
+            if !current_para.is_empty() {
+                let para_text = current_para.join("\n");
+                if suppressed_map.contains_key(para_text.as_str()) {
+                    let n = current_para.len();
+                    let zi_id = panda_core::zoom::register(
+                        current_para.iter().map(|l| l.to_string()).collect(),
+                    );
+                    result_lines.push(format!(
+                        "[{} lines: already read — panda expand {}]",
+                        n, zi_id
+                    ));
+                } else {
+                    result_lines.extend(current_para.iter().map(|l| l.to_string()));
+                    result_lines.push(String::new());
+                }
+                current_para.clear();
+            }
+        } else {
+            current_para.push(line);
+        }
+    }
+
+    if result_lines.last().map_or(false, |l| l.is_empty()) {
+        result_lines.pop();
+    }
+
+    result_lines.join("\n")
+}
+
+fn store_section_embeddings(
+    output: &str,
+    session: &mut crate::session::SessionState,
+    sid: &str,
+    min_lines: usize,
+) {
+    let sections = segment_output(output, min_lines);
+    if sections.is_empty() {
+        return;
+    }
+    let texts: Vec<&str> = sections.iter().map(|s| s.as_str()).collect();
+    if let Ok(embeddings) = panda_core::summarizer::embed_batch(&texts) {
+        session.add_read_section_embeddings(embeddings);
+        session.save(sid);
+    }
+}
+
+// ── Edit-aware compression (3.3) ────────────────────────────────────────────
+
+/// Preserve context around recently-edited lines, compress everything else more
+/// aggressively. `preserve_ranges` contains (start, end) line ranges to keep.
+fn apply_edit_aware_compression(output: &str, preserve_ranges: &[(usize, usize)]) -> String {
+    let lines: Vec<&str> = output.lines().collect();
+    let n = lines.len();
+    if n == 0 || preserve_ranges.is_empty() {
+        return output.to_string();
+    }
+
+    // Build a set of lines that should be preserved
+    let mut preserve = vec![false; n];
+    for &(start, end) in preserve_ranges {
+        for i in start..end.min(n) {
+            preserve[i] = true;
+        }
+    }
+
+    let mut result: Vec<String> = Vec::new();
+    let mut skipped = 0usize;
+
+    for (i, line) in lines.iter().enumerate() {
+        if preserve[i] {
+            if skipped > 0 {
+                let zi_id = panda_core::zoom::register(
+                    lines[i.saturating_sub(skipped)..i]
+                        .iter()
+                        .map(|l| l.to_string())
+                        .collect(),
+                );
+                result.push(format!(
+                    "[{} lines compressed — panda expand {}]",
+                    skipped, zi_id
+                ));
+                skipped = 0;
+            }
+            result.push(line.to_string());
+        } else {
+            skipped += 1;
+        }
+    }
+
+    if skipped > 0 {
+        let start = n.saturating_sub(skipped);
+        let zi_id = panda_core::zoom::register(
+            lines[start..n].iter().map(|l| l.to_string()).collect(),
+        );
+        result.push(format!(
+            "[{} lines compressed — panda expand {}]",
+            skipped, zi_id
+        ));
+    }
+
+    result.join("\n")
+}
+
+// ── Focus graph embedding refresh (2.3) ──────────────────────────────────────
+
+/// After reading a file, re-embed it and update the focus graph so that
+/// the most frequently read files always have the freshest embeddings.
+fn refresh_focus_embedding(file_path: &str) {
+    // Resolve the relative path (strip repo root prefix)
+    let rel_path = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| {
+            std::path::Path::new(file_path)
+                .strip_prefix(&cwd)
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| file_path.to_string());
+
+    // Find the focus graph DB for the current repo
+    let repo_root = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let repo_hash = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        repo_root.to_string_lossy().hash(&mut hasher);
+        format!("{:x}", hasher.finish())
+    };
+    let Some(home) = dirs::home_dir() else { return };
+    let index_parent = home.join(".local/share/panda/indexes").join(&repo_hash);
+
+    let head = match panda_core::focus::indexer::current_head(&repo_root) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let db_path = index_parent.join(&head).join("graph.sqlite");
+    if !db_path.exists() {
+        return;
+    }
+
+    // Re-embed the file content
+    let content = match std::fs::read_to_string(file_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let content_prefix: String = content.chars().take(1000).collect();
+    let embed_text = format!("{}\n{}", rel_path, content_prefix);
+    let embeddings = match panda_core::summarizer::embed_batch(&[embed_text.as_str()]) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let Some(emb) = embeddings.first() else { return };
+    let blob: Vec<u8> = emb.iter().flat_map(|f| f.to_le_bytes()).collect();
+
+    // Open the graph read-write and update
+    if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+        let _ = panda_core::focus::update_embedding(&conn, &rel_path, &blob);
+    }
 }
 
 // ── Adaptive pressure helper (Feature 2) ─────────────────────────────────────

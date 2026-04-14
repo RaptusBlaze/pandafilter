@@ -354,6 +354,47 @@ pub fn get_session_guidance(session_id: &str) -> Result<Vec<(usize, usize, Optio
     Ok(results)
 }
 
+/// Get file read frequencies for a project over the last N days, normalized to [0, 1].
+/// Returns a map of relative file path → normalized frequency.
+pub fn get_file_read_frequencies(project_path: &str, days: u32) -> Result<std::collections::HashMap<String, f64>> {
+    let conn = open()?;
+    let cutoff = (now_secs().saturating_sub(days as u64 * 86400)) as i64;
+
+    // Get read counts per file across all sessions for this project's files
+    let mut stmt = conn.prepare(
+        "SELECT file_path, COUNT(*) as cnt FROM session_reads
+         WHERE timestamp_secs >= ?1
+         GROUP BY file_path
+         ORDER BY cnt DESC"
+    )?;
+
+    let rows = stmt.query_map(params![cutoff], |row| {
+        let path: String = row.get(0)?;
+        let count: i64 = row.get(1)?;
+        Ok((path, count))
+    })?;
+
+    let mut counts: Vec<(String, i64)> = Vec::new();
+    for row_result in rows {
+        if let Ok((path, count)) = row_result {
+            // Convert absolute paths to relative by stripping the project prefix
+            let rel_path = path.strip_prefix(project_path)
+                .map(|p| p.trim_start_matches('/').to_string())
+                .unwrap_or(path);
+            counts.push((rel_path, count));
+        }
+    }
+
+    let max_count = counts.iter().map(|(_, c)| *c).max().unwrap_or(1).max(1) as f64;
+
+    let mut freqs = std::collections::HashMap::new();
+    for (path, count) in counts {
+        freqs.insert(path, count as f64 / max_count);
+    }
+
+    Ok(freqs)
+}
+
 /// Get reads in a session.
 pub fn get_session_reads(session_id: &str) -> Result<Vec<(String, usize)>> {
     let conn = open()?;

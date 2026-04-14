@@ -254,12 +254,32 @@ fn hook_mode() -> Result<()> {
         }
     };
 
-    let prompt_embedding = match embeddings.first() {
+    let raw_prompt_embedding = match embeddings.first() {
         Some(emb) => emb.clone(),
         None => {
             println!("{}", json!({"guidance": null}));
             return Ok(());
         }
+    };
+
+    // 2.1: Blend with intent from assistant messages for richer context
+    let prompt_embedding = if let Some(intent_text) = crate::intent::extract_intent_multi(3) {
+        if let Ok(intent_embs) = panda_core::summarizer::embed_batch(&[intent_text.as_str()]) {
+            if let Some(intent_emb) = intent_embs.first() {
+                // Blend: 0.6 * intent + 0.4 * prompt
+                raw_prompt_embedding
+                    .iter()
+                    .zip(intent_emb.iter())
+                    .map(|(p, i)| p * 0.4 + i * 0.6)
+                    .collect()
+            } else {
+                raw_prompt_embedding
+            }
+        } else {
+            raw_prompt_embedding
+        }
+    } else {
+        raw_prompt_embedding
     };
 
     // Session continuity: skip guidance if prompt is similar to recent prompts
@@ -301,8 +321,18 @@ fn hook_mode() -> Result<()> {
         return Ok(());
     }
 
-    // Query for relevant files
-    let ranked = match panda_core::focus::query(&conn, &prompt_embedding, 6) {
+    // 2.2: Query read history for feedback loop
+    let project_path = crate::util::project_key().unwrap_or_default();
+    let read_boosts = crate::analytics_db::get_file_read_frequencies(&project_path, 7)
+        .ok();
+
+    // Query for relevant files (with read boosts if available)
+    let ranked = match panda_core::focus::query_with_read_boosts(
+        &conn,
+        &prompt_embedding,
+        6,
+        read_boosts.as_ref(),
+    ) {
         Ok(files) => files,
         Err(_) => {
             println!("{}", json!({"guidance": null}));
@@ -323,7 +353,6 @@ fn hook_mode() -> Result<()> {
     // Record guidance event for analytics
     let guidance_tokens = panda_core::tokens::count_tokens(&guidance.guidance_text);
     let excluded_tokens_est = total_files.saturating_sub(recommended_count) * 50; // rough estimate
-    let project_path = crate::util::project_key().unwrap_or_default();
     let _ = crate::analytics_db::record_guidance(
         &sid,
         recommended_count,

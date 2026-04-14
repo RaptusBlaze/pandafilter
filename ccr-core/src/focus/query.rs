@@ -15,21 +15,39 @@ pub struct RankedFile {
 /// Query the focus graph for relevant files given a prompt embedding.
 ///
 /// Returns files ranked by a combination of:
-/// 1. Semantic similarity (embedding distance)
-/// 2. Co-change frequency (how often changed with similar files)
-/// 3. Role classification (entry points scored higher)
+/// 1. Semantic similarity (embedding distance)  — weight 0.5
+/// 2. Co-change frequency (log-normalized)      — weight 0.2
+/// 3. Read history boost (if provided)          — weight 0.3
+/// 4. Role classification multiplier
 pub fn query(
     conn: &Connection,
     prompt_embedding: &[f32],
     top_k: usize,
 ) -> Result<Vec<RankedFile>> {
+    query_with_read_boosts(conn, prompt_embedding, top_k, None)
+}
 
-    // Get all files with their embeddings
+/// Like `query` but accepts optional read-history boosts (file_path → normalized frequency).
+pub fn query_with_read_boosts(
+    conn: &Connection,
+    prompt_embedding: &[f32],
+    top_k: usize,
+    read_boosts: Option<&std::collections::HashMap<String, f64>>,
+) -> Result<Vec<RankedFile>> {
+    // Pass 1: collect raw scores
     let mut stmt = conn.prepare(
         "SELECT path, role, role_confidence, embedding, commit_count FROM files"
     )?;
 
-    let mut candidates = Vec::new();
+    struct RawCandidate {
+        path: String,
+        role: String,
+        confidence: f64,
+        similarity: f64,
+        raw_cochange: i64,
+    }
+
+    let mut raw_candidates: Vec<RawCandidate> = Vec::new();
     let rows = stmt.query_map([], |row| {
         let path: String = row.get(0)?;
         let role: String = row.get(1)?;
@@ -40,36 +58,68 @@ pub fn query(
 
     for row_result in rows {
         let (path, role, confidence, blob) = row_result?;
-
-        // Reconstruct embedding from blob (4-byte floats)
         let file_embedding = blob_to_embedding(&blob);
-
-        // Compute cosine similarity
-        let similarity = cosine_similarity(&prompt_embedding, &file_embedding);
-
-        // Get cochange context (files that co-change with this file)
-        let cochange_score = get_cochange_score(conn, &path)?;
-
-        // Compute final relevance score
-        let relevance_score = similarity * 0.7 + (cochange_score as f64 * 0.3);
-
-        // Boost entry points
-        let role_boost = match role.as_str() {
-            "entry_point" => 1.5,
-            "persistence" => 1.2,
-            "state_manager" => 1.1,
-            _ => 1.0,
-        };
-
-        let final_score = relevance_score * role_boost;
-
-        candidates.push((path, role, confidence, cochange_score, final_score));
+        let similarity = cosine_similarity(prompt_embedding, &file_embedding);
+        let raw_cochange = get_cochange_score(conn, &path)?;
+        raw_candidates.push(RawCandidate {
+            path,
+            role,
+            confidence,
+            similarity,
+            raw_cochange,
+        });
     }
 
-    // Sort by relevance score descending
+    // Pass 2: log-normalize co-change scores to [0, 1]
+    let max_cochange = raw_candidates
+        .iter()
+        .map(|c| c.raw_cochange)
+        .max()
+        .unwrap_or(0);
+    let log_max = (1.0 + max_cochange as f64).ln();
+
+    let has_read_boosts = read_boosts.map_or(false, |rb| !rb.is_empty());
+
+    // Weights: if read boosts available, use 0.5/0.2/0.3; otherwise 0.7/0.3/0
+    let (w_sim, w_cochange, w_read) = if has_read_boosts {
+        (0.5, 0.2, 0.3)
+    } else {
+        (0.7, 0.3, 0.0)
+    };
+
+    let mut candidates: Vec<(String, String, f64, i64, f64)> = raw_candidates
+        .into_iter()
+        .map(|c| {
+            let norm_cochange = if log_max > 0.0 {
+                (1.0 + c.raw_cochange as f64).ln() / log_max
+            } else {
+                0.0
+            };
+
+            let read_boost = if w_read > 0.0 {
+                read_boosts
+                    .and_then(|rb| rb.get(&c.path))
+                    .copied()
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
+
+            let relevance = c.similarity * w_sim + norm_cochange * w_cochange + read_boost * w_read;
+
+            let role_boost = match c.role.as_str() {
+                "entry_point" => 1.5,
+                "persistence" => 1.2,
+                "state_manager" => 1.1,
+                _ => 1.0,
+            };
+
+            (c.path, c.role, c.confidence, c.raw_cochange, relevance * role_boost)
+        })
+        .collect();
+
     candidates.sort_by(|a, b| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Return top-K
     Ok(candidates
         .into_iter()
         .take(top_k)

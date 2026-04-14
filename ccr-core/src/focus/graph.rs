@@ -108,6 +108,16 @@ fn check_schema_version(conn: &Connection) -> Result<()> {
     }
 }
 
+/// Update a file's embedding in the focus graph.
+/// Used to refresh stale index-time embeddings with fresh ones from read processing.
+pub fn update_embedding(conn: &Connection, path: &str, embedding_blob: &[u8]) -> Result<()> {
+    conn.execute(
+        "UPDATE files SET embedding = ?1 WHERE path = ?2",
+        rusqlite::params![embedding_blob, path],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
