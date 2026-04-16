@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 pub fn run() -> Result<()> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot locate home directory"))?;
     let mut any_error = false;
+    let mut needs_init = false;
 
     println!("{}", "PandaFilter Doctor".bold());
     println!("{}", "═".repeat(52));
@@ -18,9 +19,9 @@ pub fn run() -> Result<()> {
     println!();
     println!("{}", "Hook Setup".bold());
     let hook_script = home.join(".claude").join("hooks").join("panda-rewrite.sh");
-    let bin_in_hook = check_hook_script(&hook_script, &mut any_error);
+    let bin_in_hook = check_hook_script(&hook_script, &mut any_error, &mut needs_init);
     let settings = home.join(".claude").join("settings.json");
-    check_settings(&settings, &mut any_error);
+    check_settings(&settings, &mut any_error, &mut needs_init);
     check_jq();
 
     // ── 2. Analytics ─────────────────────────────────────────────────────────
@@ -37,27 +38,32 @@ pub fn run() -> Result<()> {
     if let Some(ref p) = bin_in_hook {
         println!();
         println!("{}", "Hook Binary".bold());
-        check_hook_binary(p, &mut any_error);
+        check_hook_binary(p, &mut any_error, &mut needs_init);
     }
 
-    // ── 5. Tips ───────────────────────────────────────────────────────────────
+    // ── 5. Summary ───────────────────────────────────────────────────────────
     println!();
     if any_error {
         println!(
             "{}",
-            "One or more checks failed. See items marked ✗ above.".red()
+            "One or more checks failed.".red()
         );
+        println!();
+        println!("{}", "To fix:".bold());
+        if needs_init {
+            println!("  1. panda init                  # re-register hooks");
+            println!("  2. Restart Claude Code          # reload settings.json");
+            println!("  3. panda doctor                 # verify the fix");
+        } else {
+            println!("  See the fix suggestions next to each ✗ above.");
+        }
     } else {
-        println!("{}", "All checks passed.".green().bold());
+        println!("{}", "All checks passed — PandaFilter is ready.".green().bold());
+        println!();
+        println!("If panda gain still shows 0 runs:");
+        println!("  1. Commands must be run BY Claude Code (not typed in terminal)");
+        println!("  2. Restart Claude Code if you just ran 'panda init'");
     }
-    println!();
-    println!("If panda gain still shows 0 runs after all checks pass:");
-    println!("  1. Commands must be run BY Claude Code (ask it: \"run git status\")");
-    println!("     — not typed by you in the terminal");
-    println!("  2. Restart Claude Code after running 'panda init'");
-    println!("     — hooks in settings.json only activate at session start");
-    println!("  3. Verify manually: ask Claude Code to run a command, then check");
-    println!("     'panda gain' — Runs should increment");
 
     Ok(())
 }
@@ -101,14 +107,15 @@ fn err(label: &str, detail: &str, fix: &str, any_error: &mut bool) {
 
 /// Check the hook script exists and is executable. Returns the panda binary path
 /// embedded in the script (if parseable).
-fn check_hook_script(script: &Path, any_error: &mut bool) -> Option<PathBuf> {
+fn check_hook_script(script: &Path, any_error: &mut bool, needs_init: &mut bool) -> Option<PathBuf> {
     if !script.exists() {
         err(
             "Hook script",
             "NOT found — commands won't be rewritten",
-            "run: panda init   then restart Claude Code",
+            "run: panda init",
             any_error,
         );
+        *needs_init = true;
         return None;
     }
 
@@ -154,14 +161,15 @@ fn extract_bin_path(content: &str) -> Option<PathBuf> {
     None
 }
 
-fn check_settings(settings: &Path, any_error: &mut bool) {
+fn check_settings(settings: &Path, any_error: &mut bool, needs_init: &mut bool) {
     if !settings.exists() {
         err(
             "settings.json",
             "NOT found — hooks will never fire",
-            "run: panda init   then restart Claude Code",
+            "run: panda init",
             any_error,
         );
+        *needs_init = true;
         return;
     }
 
@@ -182,20 +190,52 @@ fn check_settings(settings: &Path, any_error: &mut bool) {
         err(
             "settings.json PreToolUse",
             "NOT registered — commands won't be rewritten",
-            "run: panda init   then restart Claude Code",
+            "run: panda init",
             any_error,
         );
+        *needs_init = true;
     }
 
     if has_post {
         ok("settings.json PostToolUse", "panda hook registered");
+        // Validate that the panda binary path in PostToolUse hooks actually exists
+        check_settings_binary_paths(&content, any_error, needs_init);
     } else {
         err(
             "settings.json PostToolUse",
             "NOT registered — output won't be filtered",
-            "run: panda init   then restart Claude Code",
+            "run: panda init",
             any_error,
         );
+        *needs_init = true;
+    }
+}
+
+/// Check that binary paths referenced in settings.json PostToolUse hooks exist on disk.
+/// Catches the common post-upgrade issue where brew moves the binary to a new cellar path.
+fn check_settings_binary_paths(content: &str, any_error: &mut bool, needs_init: &mut bool) {
+    // Extract absolute paths from "command" values that reference panda or ccr
+    // Pattern: "command": "... /some/path/to/panda hook" or similar
+    for line in content.lines() {
+        let trimmed = line.trim().trim_matches('"');
+        // Look for absolute paths in hook command strings
+        for token in trimmed.split_whitespace() {
+            if token.starts_with('/') && (token.contains("panda") || token.contains("ccr")) {
+                // Strip any trailing quotes or punctuation from JSON
+                let clean = token.trim_end_matches(|c: char| c == '"' || c == ',' || c == '\'');
+                let path = Path::new(clean);
+                if !path.exists() {
+                    err(
+                        "Hook binary path",
+                        &format!("{} NOT FOUND", clean),
+                        "run: panda init",
+                        any_error,
+                    );
+                    *needs_init = true;
+                    return; // one error is enough — init fixes all paths
+                }
+            }
+        }
     }
 }
 
@@ -333,7 +373,7 @@ fn check_rewrite() {
     }
 }
 
-fn check_hook_binary(bin_path: &Path, any_error: &mut bool) {
+fn check_hook_binary(bin_path: &Path, any_error: &mut bool, needs_init: &mut bool) {
     if bin_path.exists() {
         ok(
             "Binary in hook",
@@ -343,18 +383,14 @@ fn check_hook_binary(bin_path: &Path, any_error: &mut bool) {
         err(
             "Binary in hook",
             &format!("{} NOT FOUND", bin_path.display()),
-            "run: panda init   (rewrites hook with current binary path)",
+            "run: panda init",
             any_error,
         );
+        *needs_init = true;
         println!(
             "     {:<28} {}",
             "",
-            "Common cause: 'brew upgrade pandafilter' changed the cellar path.".if_supports_color(Stdout, |t| t.dimmed()),
-        );
-        println!(
-            "     {:<28} {}",
-            "",
-            "Fix takes 2 seconds: panda init && restart Claude Code".if_supports_color(Stdout, |t| t.dimmed()),
+            "Common cause: binary moved after brew upgrade.".if_supports_color(Stdout, |t| t.dimmed()),
         );
     }
 }

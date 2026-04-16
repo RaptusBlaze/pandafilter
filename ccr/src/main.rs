@@ -95,6 +95,9 @@ enum Commands {
         /// Target agent to install hooks for
         #[arg(long, value_enum, default_value = "claude")]
         agent: AgentTarget,
+        /// Skip BERT model download (hooks only — model downloads on first use)
+        #[arg(long)]
+        skip_model: bool,
     },
     /// Execute a command through CCR's specialized handlers
     Run {
@@ -192,11 +195,11 @@ fn main() {
         Commands::Doctor => cmd::doctor::run(),
         Commands::Hook => hook::run(),
         Commands::Index { repo } => cmd::index::run(repo),
-        Commands::Init { uninstall, agent } => match (uninstall, agent) {
+        Commands::Init { uninstall, agent, skip_model } => match (uninstall, agent) {
             (true,  AgentTarget::Claude)  => uninstall_panda(),
             (true,  AgentTarget::Cursor)  => uninstall_cursor(),
-            (false, AgentTarget::Claude)  => init(),
-            (false, AgentTarget::Cursor)  => init_cursor(),
+            (false, AgentTarget::Claude)  => init(skip_model),
+            (false, AgentTarget::Cursor)  => init_cursor(skip_model),
             (false, AgentTarget::Copilot) => init_agent("copilot"),
             (false, AgentTarget::Gemini)  => init_agent("gemini"),
             (false, AgentTarget::Cline)   => init_agent("cline"),
@@ -257,7 +260,7 @@ fn main() {
     }
 }
 
-fn init() -> anyhow::Result<()> {
+fn init(skip_model: bool) -> anyhow::Result<()> {
     use serde_json::Value;
 
     let home = dirs::home_dir()
@@ -331,12 +334,20 @@ jq -n --argjson updated "$UPDATED_INPUT" \
     println!("  PostToolUse: {} → {}", panda_hook_cmd, settings_path.display());
     println!("  PreToolUse:  {} → {}", panda_rewrite_cmd, settings_path.display());
 
-    // Pre-download the BERT model now so it's ready before the first Claude session.
-    println!();
-    if let Err(e) = panda_core::summarizer::preload_model() {
-        eprintln!("warning: could not pre-load BERT model: {e}");
-        eprintln!("         it will download automatically on first use.");
+    if skip_model {
+        println!();
+        println!("Skipped BERT model download (will download on first use).");
+    } else {
+        // Pre-download the BERT model now so it's ready before the first Claude session.
+        println!();
+        if let Err(e) = panda_core::summarizer::preload_model() {
+            eprintln!("warning: could not pre-load BERT model: {e}");
+            eprintln!("         it will download automatically on first use.");
+        }
     }
+
+    println!();
+    println!("Run 'panda doctor' to verify your installation.");
 
     Ok(())
 }
@@ -436,7 +447,7 @@ fn uninstall_panda() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_cursor() -> anyhow::Result<()> {
+fn init_cursor(skip_model: bool) -> anyhow::Result<()> {
     use serde_json::Value;
 
     let home = dirs::home_dir()
@@ -561,11 +572,19 @@ jq -n --argjson updated "$UPDATED" '{{"permission":"allow","updated_input":$upda
     println!("  PreToolUse:  {} → {}", script_path.display(), hooks_json_path.display());
     println!("  PostToolUse: {} → {}", hook_cmd, hooks_json_path.display());
 
-    println!();
-    if let Err(e) = panda_core::summarizer::preload_model() {
-        eprintln!("warning: could not pre-load BERT model: {e}");
-        eprintln!("         it will download automatically on first use.");
+    if skip_model {
+        println!();
+        println!("Skipped BERT model download (will download on first use).");
+    } else {
+        println!();
+        if let Err(e) = panda_core::summarizer::preload_model() {
+            eprintln!("warning: could not pre-load BERT model: {e}");
+            eprintln!("         it will download automatically on first use.");
+        }
     }
+
+    println!();
+    println!("Run 'panda doctor' to verify your installation.");
 
     Ok(())
 }
@@ -711,7 +730,7 @@ fn uninstall_agent(agent: &str) -> anyhow::Result<()> {
 
 fn init_all_agents() -> anyhow::Result<()> {
     // Always install the Claude (default) agent first
-    init()?;
+    init(false)?;
     // Then attempt each new agent, printing warnings on failure
     for agent in &["copilot", "gemini", "cline"] {
         if let Err(e) = init_agent(agent) {

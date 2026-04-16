@@ -32,19 +32,31 @@ class Pandafilter < Formula
   end
 
   def post_install
-    # Pre-download the BERT model and register hooks automatically.
-    # Runs as the installing user so ~/.cache, ~/.claude, and ~/.cursor are correct.
-    # quiet_system — don't fail the install if an agent isn't set up yet.
-    quiet_system bin/"panda", "init"
-    quiet_system bin/"panda", "init", "--agent", "cursor"
+    # Register hooks (fast, no network). BERT model downloads lazily on first use.
+    # quiet_system won't fail the install, but we check the result to guide the user.
+    claude_ok = quiet_system bin/"panda", "init", "--skip-model"
+    cursor_ok = quiet_system bin/"panda", "init", "--agent", "cursor", "--skip-model"
+
+    if claude_ok || cursor_ok
+      ohai "Hooks installed. Run `panda doctor` to verify."
+    else
+      opoo "Hook setup could not complete automatically."
+      puts "  Run manually after install:"
+      puts "    panda init"
+      puts "    panda doctor"
+    end
   end
 
   def caveats
     <<~EOS
-      PandaFilter setup runs automatically during install (hooks + BERT model download).
-      If you see hook errors, re-run manually:
+      Verify your installation:
+        panda doctor
+
+      If doctor reports issues, re-run setup:
         panda init                      # Claude Code
         panda init --agent cursor       # Cursor
+
+      Then restart your coding agent for hooks to take effect.
     EOS
   end
 

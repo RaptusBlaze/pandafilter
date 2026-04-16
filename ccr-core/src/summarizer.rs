@@ -105,8 +105,14 @@ fn load_model(name: &str) -> anyhow::Result<fastembed::TextEmbedding> {
         _ => EmbeddingModel::AllMiniLML6V2,
     };
 
+    let cache_dir = std::env::var("HOME")
+        .map(|h| std::path::PathBuf::from(h).join(".local/share/ccr/fastembed"))
+        .unwrap_or_else(|_| std::path::PathBuf::from(".fastembed_cache"));
+
     let model = TextEmbedding::try_new(
-        InitOptions::new(embedding_model).with_show_download_progress(false),
+        InitOptions::new(embedding_model)
+            .with_cache_dir(cache_dir)
+            .with_show_download_progress(false),
     )?;
 
     mark_bert_cached();
