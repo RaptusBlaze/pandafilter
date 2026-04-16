@@ -77,6 +77,31 @@ pub fn open() -> Result<Connection> {
             timestamp_secs  INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_reads_session ON session_reads(session_id);
+
+        CREATE TABLE IF NOT EXISTS focus_compression_events (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id          TEXT NOT NULL,
+            file_path           TEXT NOT NULL,
+            timestamp_secs      INTEGER NOT NULL,
+            sections_total      INTEGER NOT NULL,
+            sections_preserved  INTEGER NOT NULL,
+            sections_compressed INTEGER NOT NULL,
+            lines_preserved     INTEGER NOT NULL,
+            lines_compressed    INTEGER NOT NULL,
+            old_method_tokens   INTEGER NOT NULL DEFAULT 0,
+            new_method_tokens   INTEGER NOT NULL DEFAULT 0,
+            section_details     TEXT,
+            project_path        TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS focus_edit_hits (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      TEXT NOT NULL,
+            file_path       TEXT NOT NULL,
+            timestamp_secs  INTEGER NOT NULL,
+            edit_line       INTEGER NOT NULL,
+            was_preserved   INTEGER NOT NULL
+        );
         "#,
     )?;
     Ok(conn)
@@ -438,6 +463,118 @@ pub fn get_session_reads(session_id: &str) -> Result<Vec<(String, usize)>> {
         results.push(row_result?);
     }
     Ok(results)
+}
+
+// ── Focus compression analytics ──────────────────────────────────────────────
+
+/// Record a focus compression event for a file.
+pub fn record_focus_compression(
+    session_id: &str,
+    file_path: &str,
+    result: &crate::handlers::focus_compress::FocusCompressResult,
+    project_path: &str,
+) -> Result<()> {
+    let conn = open()?;
+    // Serialize section_details as array of (start, end, was_preserved) tuples
+    let details_vec: Vec<(usize, usize, bool)> = result
+        .section_details
+        .iter()
+        .map(|d| (d.start_line, d.end_line, d.preserved))
+        .collect();
+    let details_json = serde_json::to_string(&details_vec).ok();
+    conn.execute(
+        "INSERT INTO focus_compression_events \
+         (session_id, file_path, timestamp_secs, sections_total, sections_preserved, \
+          sections_compressed, lines_preserved, lines_compressed, old_method_tokens, \
+          new_method_tokens, section_details, project_path) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            session_id,
+            file_path,
+            now_secs() as i64,
+            result.sections_total as i64,
+            result.sections_preserved as i64,
+            result.sections_compressed as i64,
+            result.lines_preserved as i64,
+            result.lines_compressed as i64,
+            result.old_method_tokens as i64,
+            result.new_method_tokens as i64,
+            details_json,
+            project_path,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Record whether an edit landed in a preserved or compressed section.
+pub fn record_focus_edit_hit(
+    session_id: &str,
+    file_path: &str,
+    edit_line: usize,
+    was_preserved: bool,
+) -> Result<()> {
+    let conn = open()?;
+    conn.execute(
+        "INSERT INTO focus_edit_hits \
+         (session_id, file_path, timestamp_secs, edit_line, was_preserved) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            session_id,
+            file_path,
+            now_secs() as i64,
+            edit_line as i64,
+            was_preserved as i32,
+        ],
+    )?;
+    Ok(())
+}
+
+pub struct FocusCompressionStats {
+    pub files_compressed: usize,
+    pub total_lines_saved_vs_old: usize,
+    pub total_new_tokens: usize,
+    pub total_old_tokens: usize,
+    pub edit_hit_rate: f64,
+}
+
+/// Query aggregate focus compression stats since `cutoff` (unix timestamp).
+pub fn focus_compression_stats(cutoff: u64) -> Result<FocusCompressionStats> {
+    let conn = open()?;
+
+    let (files_compressed, total_old_tokens, total_new_tokens, _total_lines_compressed): (i64, i64, i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(old_method_tokens), 0), \
+                    COALESCE(SUM(new_method_tokens), 0), COALESCE(SUM(lines_compressed), 0) \
+             FROM focus_compression_events WHERE timestamp_secs >= ?1",
+            params![cutoff as i64],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap_or((0, 0, 0, 0));
+
+    let total_lines_saved_vs_old = (total_old_tokens.saturating_sub(total_new_tokens)) as usize;
+
+    let (total_hits, total_edits): (i64, i64) = conn
+        .query_row(
+            "SELECT COALESCE(SUM(was_preserved), 0), COUNT(*) \
+             FROM focus_edit_hits WHERE timestamp_secs >= ?1",
+            params![cutoff as i64],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap_or((0, 0));
+
+    let edit_hit_rate = if total_edits > 0 {
+        total_hits as f64 / total_edits as f64
+    } else {
+        0.0
+    };
+
+    Ok(FocusCompressionStats {
+        files_compressed: files_compressed as usize,
+        total_lines_saved_vs_old,
+        total_new_tokens: total_new_tokens as usize,
+        total_old_tokens: total_old_tokens as usize,
+        edit_hit_rate,
+    })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

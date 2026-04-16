@@ -957,6 +957,23 @@ fn print_focus_insight_compact(cutoff: u64) {
         "    ~{:.0} files recommended per prompt · {:.0}% of codebase excluded",
         avg_recommended, exclusion_pct,
     );
+
+    // Query focus compression stats
+    if let Ok(stats) = crate::analytics_db::focus_compression_stats(cutoff) {
+        if stats.files_compressed > 0 {
+            let token_savings = stats.total_old_tokens.saturating_sub(stats.total_new_tokens);
+            println!(
+                "    Focus compression: {} files · {} tokens saved vs head/tail{}",
+                stats.files_compressed,
+                fmt_number(token_savings),
+                if stats.edit_hit_rate > 0.0 {
+                    format!(" · {:.0}% edit-hit rate", stats.edit_hit_rate * 100.0)
+                } else {
+                    String::new()
+                },
+            );
+        }
+    }
 }
 
 /// Print an actionable tip based on the user's data.

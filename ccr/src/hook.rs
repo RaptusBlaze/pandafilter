@@ -401,6 +401,105 @@ fn process_bash(hook_input: HookInput) -> Result<Option<String>> {
     Ok(Some(serde_json::to_string(&hook_output)?))
 }
 
+// ── Focus-aware compression ───────────────────────────────────────────────────
+
+/// Attempt focus-aware compression for a large code file.
+/// Returns `Some((output, result))` if focus is active and compression was applied.
+/// Returns `None` to fall through to the normal pipeline.
+fn try_focus_compress(
+    file_path: &str,
+    content: &str,
+    session: &crate::session::SessionState,
+    _line_count: usize,
+) -> Option<(String, crate::handlers::focus_compress::FocusCompressResult)> {
+    // 1. Get prompt embedding (gated on focus being active)
+    let prompt_emb = session.command_centroid("(focus_prompt)")?.clone();
+
+    // 2. File must be a code file (check extension)
+    let ext = std::path::Path::new(file_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+
+    if !matches!(
+        ext.to_lowercase().as_str(),
+        "rs" | "ts"
+            | "tsx"
+            | "js"
+            | "jsx"
+            | "mjs"
+            | "cjs"
+            | "go"
+            | "java"
+            | "cs"
+            | "cpp"
+            | "cc"
+            | "c"
+            | "h"
+            | "hpp"
+            | "py"
+            | "pyi"
+    ) {
+        return None;
+    }
+
+    // 3. Enable zoom for registering blocks
+    panda_core::zoom::enable();
+
+    // 4. Split into sections
+    let sections = crate::handlers::focus_compress::split_into_sections(content, ext);
+
+    if sections.len() < 2 {
+        return None;
+    }
+
+    // 5. Get edit-preserve ranges
+    let preserve_ranges = session.edit_preserve_ranges(file_path, 20);
+
+    // 6. Score and compress
+    let result = crate::handlers::focus_compress::score_and_compress(
+        &sections,
+        &prompt_emb,
+        &preserve_ranges,
+    )
+    .ok()?;
+
+    if result.sections_compressed == 0 {
+        return None;
+    }
+
+    let output = result.output.clone();
+    Some((output, result))
+}
+
+fn check_focus_edit_hit(session_id: &str, file_path: &str, edit_line: usize) {
+    if let Ok(conn) = crate::analytics_db::open() {
+        let result: rusqlite::Result<String> = conn.query_row(
+            "SELECT section_details FROM focus_compression_events \
+             WHERE session_id = ?1 AND file_path = ?2 \
+             ORDER BY timestamp_secs DESC LIMIT 1",
+            rusqlite::params![session_id, file_path],
+            |row| row.get(0),
+        );
+
+        if let Ok(details_json) = result {
+            if let Ok(details) =
+                serde_json::from_str::<Vec<(usize, usize, bool)>>(&details_json)
+            {
+                let was_preserved = details.iter().any(|(start, end, preserved)| {
+                    *preserved && edit_line >= *start && edit_line < *end
+                });
+                let _ = crate::analytics_db::record_focus_edit_hit(
+                    session_id,
+                    file_path,
+                    edit_line,
+                    was_preserved,
+                );
+            }
+        }
+    }
+}
+
 // ── Read tool handler ─────────────────────────────────────────────────────────
 
 fn process_read(hook_input: HookInput) -> Result<Option<String>> {
@@ -470,6 +569,47 @@ fn process_read(hook_input: HookInput) -> Result<Option<String>> {
     let mut session = crate::session::SessionState::load(&sid);
     let historical_centroid = session.command_centroid(&file_path).cloned();
     let pressure = session.context_pressure();
+
+    // Focus-aware compression: replaces head/tail for large code files when focus is active
+    if line_count >= 150 {
+        if let Some((focus_output, focus_result)) =
+            try_focus_compress(&file_path, &output_text, &session, line_count)
+        {
+            let zoom_blocks = panda_core::zoom::drain();
+            let _ = crate::zoom_store::save_blocks(&sid, zoom_blocks);
+
+            if let Ok(mut embs) =
+                panda_core::summarizer::embed_batch(&[focus_output.as_str()])
+            {
+                if let Some(emb) = embs.pop() {
+                    let tokens = panda_core::tokens::count_tokens(&focus_output);
+                    session.record(&file_path, emb, tokens, &focus_output, false, None);
+                    session.save(&sid);
+                }
+            }
+
+            let input_tokens = panda_core::tokens::count_tokens(&output_text);
+            let output_tokens = panda_core::tokens::count_tokens(&focus_output);
+            let analytics = panda_core::analytics::Analytics::new(
+                input_tokens,
+                output_tokens,
+                Some("(read-focus)".to_string()),
+                None,
+                None,
+            );
+            crate::util::append_analytics(&analytics);
+            let _ = crate::analytics_db::record_session_read(&sid, &file_path, input_tokens);
+            let _ = crate::analytics_db::record_focus_compression(
+                &sid,
+                &file_path,
+                &focus_result,
+                &crate::util::project_key().unwrap_or_default(),
+            );
+            refresh_focus_embedding(&file_path);
+
+            return Ok(Some(serde_json::to_string(&HookOutput { output: focus_output })?));
+        }
+    }
 
     panda_core::zoom::enable();
     let pipeline = panda_core::pipeline::Pipeline::new(config.with_pressure(pressure));
@@ -579,6 +719,9 @@ fn process_edit(hook_input: HookInput) -> Result<Option<String>> {
             let mut session = crate::session::SessionState::load(&sid);
             session.record_edit(&file_path, start_line, end_line);
             session.save(&sid);
+
+            // Focus edit-hit tracking: was this edit in a preserved or compressed section?
+            check_focus_edit_hit(&sid, &file_path, start_line);
         }
     }
 

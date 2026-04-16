@@ -15,6 +15,7 @@ pub mod env;
 pub mod ember;
 pub mod eslint;
 pub mod find;
+pub mod focus_compress;
 pub mod gh;
 pub mod git;
 pub mod go;
