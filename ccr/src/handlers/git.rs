@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use super::Handler;
 
 pub struct GitHandler;
@@ -51,11 +53,23 @@ impl Handler for GitHandler {
         let subcmd = git_subcmd(args);
         match subcmd {
             "log" => {
-                if !args.iter().any(|a| a == "--oneline") {
-                    let mut out = args.to_vec();
-                    // Insert after the last global-option/value pair, just before subcmd
-                    let subcmd_pos = args.iter().position(|a| a.as_str() == subcmd).unwrap_or(1);
-                    out.insert(subcmd_pos + 1, "--oneline".to_string());
+                let mut out = args.to_vec();
+                let subcmd_pos = args.iter().position(|a| a.as_str() == subcmd).unwrap_or(1);
+                // Insert flags after subcmd position, in reverse order so they end up
+                // as: log --oneline --graph --decorate
+                let mut insert_pos = subcmd_pos + 1;
+                if !out.iter().any(|a| a == "--oneline") {
+                    out.insert(insert_pos, "--oneline".to_string());
+                    insert_pos += 1;
+                }
+                if !out.iter().any(|a| a == "--graph") {
+                    out.insert(insert_pos, "--graph".to_string());
+                    insert_pos += 1;
+                }
+                if !out.iter().any(|a| a == "--decorate") {
+                    out.insert(insert_pos, "--decorate".to_string());
+                }
+                if out != args {
                     return out;
                 }
             }
@@ -219,6 +233,62 @@ const HUNK_LINE_CAP: usize = 20;
 const DIFF_TOTAL_CAP: usize = 60;
 /// Maximum context lines kept on each side of a changed block.
 const MAX_CONTEXT_PER_SIDE: usize = 2;
+/// Maximum character length for a single +/- diff line before truncation.
+const DIFF_LINE_CHAR_CAP: usize = 120;
+/// Jaccard similarity threshold: pairs above this are counted as ~modified.
+const JACCARD_THRESHOLD: f64 = 0.5;
+
+/// Compute Jaccard similarity between two strings by splitting on whitespace.
+/// Returns a value in [0.0, 1.0] where 1.0 means identical token sets.
+fn jaccard_similarity(a: &str, b: &str) -> f64 {
+    let set_a: HashSet<&str> = a.split_whitespace().collect();
+    let set_b: HashSet<&str> = b.split_whitespace().collect();
+    if set_a.is_empty() && set_b.is_empty() {
+        return 1.0;
+    }
+    let intersection = set_a.intersection(&set_b).count();
+    let union = set_a.union(&set_b).count();
+    if union == 0 {
+        return 0.0;
+    }
+    intersection as f64 / union as f64
+}
+
+/// Given buffered removed and added lines from a contiguous change block,
+/// greedily pair them by position and classify via Jaccard similarity.
+/// Returns (pure_added, pure_removed, modified) counts.
+fn classify_changes(removed: &[&str], added: &[&str]) -> (usize, usize, usize) {
+    let paired = removed.len().min(added.len());
+    let mut modified = 0usize;
+    let mut dissimilar_pairs = 0usize;
+
+    for i in 0..paired {
+        // Strip the leading +/- prefix before comparing content
+        let r = removed[i].get(1..).unwrap_or("");
+        let a = added[i].get(1..).unwrap_or("");
+        if jaccard_similarity(r, a) >= JACCARD_THRESHOLD {
+            modified += 1;
+        } else {
+            dissimilar_pairs += 1;
+        }
+    }
+
+    // Dissimilar pairs count as both a removal and an addition (not modifications).
+    // Unpaired extras are pure additions or removals.
+    let pure_removed = dissimilar_pairs + removed.len().saturating_sub(paired);
+    let pure_added = dissimilar_pairs + added.len().saturating_sub(paired);
+    (pure_added, pure_removed, modified)
+}
+
+/// Truncate a diff line to DIFF_LINE_CHAR_CAP characters, preserving the +/- prefix.
+fn truncate_diff_line(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    if chars.len() > DIFF_LINE_CHAR_CAP {
+        format!("{}…", chars[..DIFF_LINE_CHAR_CAP - 1].iter().collect::<String>())
+    } else {
+        line.to_string()
+    }
+}
 
 fn filter_diff(output: &str) -> String {
     if crate::handlers::util::mid_git_operation() {
@@ -227,42 +297,89 @@ fn filter_diff(output: &str) -> String {
     let lines: Vec<&str> = output.lines().collect();
     let mut out: Vec<String> = Vec::new();
 
-    // Per-file change tally (flushed when a new file starts or at end)
+    // Per-file change tally (flushed when a new file starts or at end).
+    // The macro resets these on every flush; the final flush's resets are dead stores.
+    #[allow(unused_assignments)]
     let mut file_header_idx: Option<usize> = None;
+    #[allow(unused_assignments)]
     let mut file_added: usize = 0;
+    #[allow(unused_assignments)]
     let mut file_removed: usize = 0;
+    #[allow(unused_assignments)]
+    let mut file_modified: usize = 0;
 
     let mut hunk_lines: usize = 0;
     let mut hunk_truncated = false;
     let mut total_lines: usize = 0;
     let mut global_truncated = false;
 
-    // Context trimming state: buffer context lines; flush only the last
-    // MAX_CONTEXT_PER_SIDE when the next changed line arrives.
-    let mut ctx_after: usize = 0;   // context lines already emitted after last change
-    let mut ctx_pending: Vec<String> = Vec::new(); // suppressed context awaiting next change
+    // Context trimming state
+    let mut ctx_after: usize = 0;
+    let mut ctx_pending: Vec<String> = Vec::new();
+
+    // Change block buffer: accumulate consecutive -/+ lines, then classify.
+    let mut block_removed: Vec<&str> = Vec::new();
+    let mut block_added: Vec<&str> = Vec::new();
 
     // Flush the per-file tally into the file header line.
     macro_rules! flush_file_tally {
         () => {
             if let Some(idx) = file_header_idx {
-                if file_added > 0 || file_removed > 0 {
-                    out[idx] = format!("{} [+{} -{}]", out[idx], file_added, file_removed);
+                if file_added > 0 || file_removed > 0 || file_modified > 0 {
+                    let mut parts = Vec::new();
+                    if file_added > 0 { parts.push(format!("+{}", file_added)); }
+                    if file_removed > 0 { parts.push(format!("-{}", file_removed)); }
+                    if file_modified > 0 { parts.push(format!("~{}", file_modified)); }
+                    out[idx] = format!("{} [{}]", out[idx], parts.join(" "));
                 }
                 file_header_idx = None;
                 file_added = 0;
                 file_removed = 0;
+                file_modified = 0;
+            }
+        };
+    }
+
+    // Flush a buffered change block: classify via Jaccard, update tallies.
+    macro_rules! flush_change_block {
+        () => {
+            if !block_removed.is_empty() || !block_added.is_empty() {
+                let (a, r, m) = classify_changes(&block_removed, &block_added);
+                file_added += a;
+                file_removed += r;
+                file_modified += m;
+                block_removed.clear();
+                block_added.clear();
             }
         };
     }
 
     for line in &lines {
+        // Even after global truncation, keep counting for tallies
         if global_truncated {
+            if line.starts_with("diff --git ") {
+                flush_change_block!();
+                flush_file_tally!();
+                let fname = line
+                    .split_whitespace()
+                    .last()
+                    .and_then(|s| s.strip_prefix("b/"))
+                    .unwrap_or(line);
+                file_header_idx = Some(out.len());
+                out.push(fname.to_string());
+                // Don't bump total_lines — we're in the truncated tail
+            } else if line.starts_with('+') && !line.starts_with("+++") {
+                block_added.push(line);
+            } else if line.starts_with('-') && !line.starts_with("---") {
+                block_removed.push(line);
+            } else if !line.starts_with('+') && !line.starts_with('-') {
+                flush_change_block!();
+            }
             continue;
         }
 
         if line.starts_with("diff --git ") {
-            // Flush pending context and file tally before starting new file
+            flush_change_block!();
             ctx_pending.clear();
             ctx_after = 0;
             flush_file_tally!();
@@ -289,8 +406,9 @@ fn filter_diff(output: &str) -> String {
             continue;
         }
 
-        // Hunk header: reset per-hunk state but keep context trimming state clean
+        // Hunk header: reset per-hunk state
         if line.starts_with("@@") {
+            flush_change_block!();
             ctx_pending.clear();
             ctx_after = 0;
             hunk_lines = 0;
@@ -300,8 +418,9 @@ fn filter_diff(output: &str) -> String {
             continue;
         }
 
-        // Context lines (' '): buffer after MAX_CONTEXT_PER_SIDE trailing lines
+        // Context lines (' '): flush any pending change block first
         if line.starts_with(' ') {
+            flush_change_block!();
             if hunk_truncated {
                 continue;
             }
@@ -314,7 +433,6 @@ fn filter_diff(output: &str) -> String {
                     global_truncated = true;
                 }
             } else {
-                // Suppress but keep the most recent lines for leading context
                 ctx_pending.push(line.to_string());
             }
             continue;
@@ -322,16 +440,18 @@ fn filter_diff(output: &str) -> String {
 
         // Changed lines ('+'/'-')
         if line.starts_with('+') || line.starts_with('-') {
+            // Always buffer for Jaccard classification
+            if line.starts_with('-') {
+                block_removed.push(line);
+            } else {
+                block_added.push(line);
+            }
+
             if hunk_truncated {
-                if line.starts_with('+') {
-                    file_added += 1;
-                } else {
-                    file_removed += 1;
-                }
                 continue;
             }
 
-            // Flush up to MAX_CONTEXT_PER_SIDE leading context from pending buffer
+            // Flush leading context from pending buffer
             if !ctx_pending.is_empty() {
                 let skip = ctx_pending.len().saturating_sub(MAX_CONTEXT_PER_SIDE);
                 for ctx_line in ctx_pending.drain(skip..) {
@@ -353,12 +473,7 @@ fn filter_diff(output: &str) -> String {
                 out.push("  [...truncated...]".to_string());
                 total_lines += 1;
             } else if !global_truncated {
-                if line.starts_with('+') {
-                    file_added += 1;
-                } else {
-                    file_removed += 1;
-                }
-                out.push(line.to_string());
+                out.push(truncate_diff_line(line));
                 hunk_lines += 1;
                 total_lines += 1;
                 if total_lines >= DIFF_TOTAL_CAP {
@@ -368,7 +483,8 @@ fn filter_diff(output: &str) -> String {
         }
     }
 
-    // Flush final file tally
+    // Flush remaining state
+    flush_change_block!();
     flush_file_tally!();
 
     if global_truncated {
@@ -695,6 +811,24 @@ mod tests {
         let rewritten = handler.rewrite_args(&args);
         assert!(rewritten.contains(&"--oneline".to_string()),
             "should inject --oneline even with --no-pager: {:?}", rewritten);
+        assert!(rewritten.contains(&"--graph".to_string()),
+            "should inject --graph: {:?}", rewritten);
+        assert!(rewritten.contains(&"--decorate".to_string()),
+            "should inject --decorate: {:?}", rewritten);
+    }
+
+    #[test]
+    fn test_rewrite_log_no_double_graph_decorate() {
+        let handler = GitHandler;
+        let args: Vec<String> = vec![
+            "git".into(), "log".into(), "--oneline".into(),
+            "--graph".into(), "--decorate".into(),
+        ];
+        let rewritten = handler.rewrite_args(&args);
+        assert_eq!(rewritten.iter().filter(|a| *a == "--graph").count(), 1,
+            "should not double --graph: {:?}", rewritten);
+        assert_eq!(rewritten.iter().filter(|a| *a == "--decorate").count(), 1,
+            "should not double --decorate: {:?}", rewritten);
     }
 
     #[test]
@@ -799,13 +933,35 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_per_file_tally() {
+    fn test_diff_per_file_tally_with_dissimilar_lines() {
+        // "old" → "new" has Jaccard=0 (no shared tokens), so both count independently.
+        // "extra" is unpaired addition. Total: +2 -1.
         let output = "diff --git a/foo.rs b/foo.rs\n--- a/foo.rs\n+++ b/foo.rs\n@@ -1,3 +1,4 @@\n-old\n+new\n+extra\n context\n";
         let result = filter_diff(output);
         assert!(result.contains("foo.rs"), "filename should appear, got: {}", result);
         assert!(result.contains("+new"), "added line should appear, got: {}", result);
-        // Per-file tally is now included in the filename header
         assert!(result.contains("[+2 -1]"), "tally should appear in header, got: {}", result);
+    }
+
+    #[test]
+    fn test_diff_jaccard_detects_modification() {
+        // Lines that share most tokens should be counted as ~modified
+        let output = "diff --git a/foo.rs b/foo.rs\n--- a/foo.rs\n+++ b/foo.rs\n@@ -1,3 +1,3 @@\n-    let result = compute_value(input, config);\n+    let result = compute_value(input, new_config);\n context\n";
+        let result = filter_diff(output);
+        // The lines share most tokens → Jaccard >= 0.5 → ~1 modified
+        assert!(result.contains("~1"), "similar lines should be ~modified, got: {}", result);
+        assert!(!result.contains("+1") || !result.contains("-1"),
+            "should not have separate +/- for a modification, got: {}", result);
+    }
+
+    #[test]
+    fn test_diff_jaccard_mixed_block() {
+        // 2 similar edits + 1 pure addition
+        let output = "diff --git a/foo.rs b/foo.rs\n--- a/foo.rs\n+++ b/foo.rs\n@@ -1,5 +1,6 @@\n-    let x = foo(a, b, c);\n-    let y = bar(a, b, c);\n+    let x = foo(a, b, d);\n+    let y = bar(a, b, d);\n+    let z = baz();\n context\n";
+        let result = filter_diff(output);
+        // x and y lines are similar edits → ~2, z is a pure add → +1
+        assert!(result.contains("~2"), "two similar edits should be ~2, got: {}", result);
+        assert!(result.contains("+1"), "one pure addition should be +1, got: {}", result);
     }
 
     #[test]
@@ -937,5 +1093,104 @@ mod tests {
         let output = "Switched to branch 'develop'\n";
         let result = filter_checkout(output);
         assert_eq!(result, "ok — switched to 'develop'");
+    }
+
+    // ─── jaccard similarity ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_jaccard_identical() {
+        assert_eq!(jaccard_similarity("let x = foo();", "let x = foo();"), 1.0);
+    }
+
+    #[test]
+    fn test_jaccard_completely_different() {
+        assert_eq!(jaccard_similarity("alpha beta gamma", "delta epsilon zeta"), 0.0);
+    }
+
+    #[test]
+    fn test_jaccard_partial_overlap() {
+        // "let x = foo(a, b, c);" vs "let x = foo(a, b, d);"
+        // Tokens: {let, x, =, foo(a,, b,, c);} vs {let, x, =, foo(a,, b,, d);}
+        // Shared: {let, x, =, foo(a,, b,} = 5, Union = 7
+        let sim = jaccard_similarity("let x = foo(a, b, c);", "let x = foo(a, b, d);");
+        assert!(sim > 0.5, "similar lines should have Jaccard > 0.5, got: {}", sim);
+    }
+
+    #[test]
+    fn test_jaccard_empty_lines() {
+        assert_eq!(jaccard_similarity("", ""), 1.0);
+        assert_eq!(jaccard_similarity("   ", "   "), 1.0);
+    }
+
+    // ─── diff line truncation ───────────────────────────────────────────────
+
+    #[test]
+    fn test_diff_line_truncation() {
+        let long_line = format!("+{}", "x".repeat(200));
+        let output = format!(
+            "diff --git a/foo.rs b/foo.rs\n--- a/foo.rs\n+++ b/foo.rs\n@@ -1,1 +1,1 @@\n{}\n",
+            long_line
+        );
+        let result = filter_diff(&output);
+        // The emitted + line should be truncated to DIFF_LINE_CHAR_CAP
+        for line in result.lines() {
+            if line.starts_with('+') {
+                assert!(line.chars().count() <= DIFF_LINE_CHAR_CAP,
+                    "line should be capped at {} chars, got {}: {}",
+                    DIFF_LINE_CHAR_CAP, line.chars().count(), line);
+                assert!(line.ends_with('…'), "truncated line should end with …, got: {}", line);
+            }
+        }
+    }
+
+    #[test]
+    fn test_diff_short_line_not_truncated() {
+        let output = "diff --git a/foo.rs b/foo.rs\n--- a/foo.rs\n+++ b/foo.rs\n@@ -1,1 +1,1 @@\n+    short line\n";
+        let result = filter_diff(output);
+        assert!(result.contains("+    short line"), "short lines should not be truncated, got: {}", result);
+        assert!(!result.contains('…'), "should have no ellipsis, got: {}", result);
+    }
+
+    // ─── classify_changes ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_classify_all_modifications() {
+        let removed = vec!["-    let x = compute(a, b, c);", "-    let y = process(d, e, f);"];
+        let added   = vec!["+    let x = compute(a, b, z);", "+    let y = process(d, e, z);"];
+        let (a, r, m) = classify_changes(&removed, &added);
+        assert_eq!(m, 2, "both pairs should be modifications");
+        assert_eq!(a, 0);
+        assert_eq!(r, 0);
+    }
+
+    #[test]
+    fn test_classify_pure_additions() {
+        let removed: Vec<&str> = vec![];
+        let added = vec!["+    new_line_1();", "+    new_line_2();"];
+        let (a, r, m) = classify_changes(&removed, &added);
+        assert_eq!(a, 2);
+        assert_eq!(r, 0);
+        assert_eq!(m, 0);
+    }
+
+    #[test]
+    fn test_classify_pure_removals() {
+        let removed = vec!["-    old_line_1();", "-    old_line_2();"];
+        let added: Vec<&str> = vec![];
+        let (a, r, m) = classify_changes(&removed, &added);
+        assert_eq!(a, 0);
+        assert_eq!(r, 2);
+        assert_eq!(m, 0);
+    }
+
+    #[test]
+    fn test_classify_mixed() {
+        // 1 similar pair (modification) + 1 extra addition
+        let removed = vec!["-    let x = foo(a, b, c);"];
+        let added   = vec!["+    let x = foo(a, b, d);", "+    let z = brand_new();"];
+        let (a, r, m) = classify_changes(&removed, &added);
+        assert_eq!(m, 1, "similar pair should be modification");
+        assert_eq!(a, 1, "extra added line should be pure addition");
+        assert_eq!(r, 0);
     }
 }

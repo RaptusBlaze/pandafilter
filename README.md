@@ -81,19 +81,20 @@ Numbers from `ccr/tests/handler_benchmarks.rs`. Run `panda gain` to see your own
 | `dotnet build` | 438 | 3 | **−99%** |
 | `cmake` | 850 | 5 | **−99%** |
 | `gradle build` | 803 | 17 | **−98%** |
-| `git clone` | 139 | 8 | **−94%** |
-| `bazel build` | 150 | 12 | **−92%** |
 | `go test` | 4,507 | 148 | **−97%** |
+| `git merge` | 164 | 5 | **−97%** |
 | `pytest` | 3,818 | 162 | **−96%** |
 | `terraform plan` | 3,926 | 163 | **−96%** |
 | `npm install` | 648 | 25 | **−96%** |
 | `ember build` | 3,377 | 139 | **−96%** |
 | `cargo build` | 1,923 | 93 | **−95%** |
 | `cargo test` | 2,782 | 174 | **−94%** |
+| `git clone` | 139 | 8 | **−94%** |
+| `bazel build` | 150 | 12 | **−92%** |
 | `next build` | 549 | 53 | **−90%** |
 | `cargo clippy` | 786 | 93 | **−88%** |
-| `git merge` | 164 | 5 | **−97%** |
 | `make` | 545 | 72 | **−87%** |
+| `git diff` | 6,370 | 861 | **−86%** |
 | `git push` | 173 | 24 | **−86%** |
 | `ls` | 691 | 102 | **−85%** |
 | `webpack` | 882 | 143 | **−84%** |
@@ -102,11 +103,11 @@ Numbers from `ccr/tests/handler_benchmarks.rs`. Run `panda gain` to see your own
 | `turbo run build` | 597 | 115 | **−81%** |
 | `ruff check` | 2,035 | 435 | −79% |
 | `eslint` | 4,393 | 974 | −78% |
-| `git log` | 1,573 | 353 | −78% |
 | `grep` | 2,925 | 691 | −76% |
 | `helm install` | 224 | 54 | −76% |
 | `docker ps` | 1,057 | 266 | −75% |
 | `golangci-lint` | 3,678 | 960 | −74% |
+| `git log` | 1,573 | 431 | −73% |
 | `git status` | 650 | 184 | −72% |
 | `kubectl get pods` | 2,306 | 689 | −70% |
 | `vite build` | 526 | 182 | −65% |
@@ -115,12 +116,11 @@ Numbers from `ccr/tests/handler_benchmarks.rs`. Run `panda gain` to see your own
 | `mvn install` | 4,585 | 1,613 | −65% |
 | `brew install` | 368 | 148 | −60% |
 | `gh pr list` | 774 | 321 | −59% |
-| `git diff` | 6,370 | 2,654 | −58% |
 | `biome lint` | 1,503 | 753 | −50% |
 | `tsc` | 2,598 | 1,320 | −49% |
 | `mypy` | 2,053 | 1,088 | −47% |
 | `stylelint` | 1,100 | 845 | −23% |
-| **Total** | **81,882** | **16,062** | **−80%** |
+| **Total** | **81,882** | **14,347** | **−82%** |
 
 ---
 
