@@ -326,6 +326,8 @@ jq -n --argjson updated "$UPDATED_INPUT" \
     merge_hook(&mut settings, "PostToolUse", "Bash", &panda_hook_cmd);
     merge_hook(&mut settings, "PostToolUse", "Read", &panda_hook_cmd);
     merge_hook(&mut settings, "PostToolUse", "Glob", &panda_hook_cmd);
+    merge_hook(&mut settings, "PostToolUse", "WebFetch", &panda_hook_cmd);
+    merge_hook(&mut settings, "PostToolUse", "WebSearch", &panda_hook_cmd);
     merge_hook(&mut settings, "PreToolUse",  "Bash", &panda_rewrite_cmd);
 
     let parent = settings_path.parent().unwrap();

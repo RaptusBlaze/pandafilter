@@ -45,6 +45,8 @@ pub fn process(input: &str) -> Result<Option<String>> {
         "Edit" => process_edit(hook_input),
         "Glob" => process_glob(hook_input),
         "Grep" => process_grep(hook_input),
+        "WebFetch" => process_webfetch(hook_input),
+        "WebSearch" => process_websearch(hook_input),
         _ => process_bash(hook_input), // Bash and unknown tools
     }
 }
@@ -1551,6 +1553,350 @@ fn cross_command_dedup(
 
     let _ = sid; // session_id reserved for future use (e.g. incremental zoom block saving)
     rebuild_with_suppressions(output, &current_segments, &suppress)
+}
+
+// ── WebFetch handler ──────────────────────────────────────────────────────────
+
+/// Compress fetched web pages: collapse boilerplate sections, BERT-summarize
+/// content sections up to the remaining BERT budget, protect code blocks.
+fn process_webfetch(hook_input: HookInput) -> Result<Option<String>> {
+    const SHORT_LINE_THRESHOLD: usize = 30;
+
+    let url = hook_input
+        .tool_input
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let output_text = if !hook_input.tool_response.output.is_empty() {
+        hook_input.tool_response.output.clone()
+    } else {
+        hook_input.tool_response.stdout.clone()
+    };
+
+    if output_text.is_empty() {
+        return Ok(None);
+    }
+
+    let line_count = output_text.lines().count();
+    if line_count < SHORT_LINE_THRESHOLD {
+        return Ok(None); // short page — pass through unchanged
+    }
+
+    // URL dedup: same URL fetched earlier this session → return marker
+    let sid = crate::session::session_id();
+    let mut session = crate::session::SessionState::load(&sid);
+    let url_key = format!("(webfetch) {}", url);
+    if let Some(hit) = session.find_similar(&url_key, &[]) {
+        // find_similar won't match on empty embedding — use find_exact instead
+        let _ = hit;
+    }
+    // Exact URL dedup via session content_preview
+    if let Some(hit) = session.find_exact(&url_key, &output_text.chars().take(4000).collect::<String>()) {
+        let age = crate::session::format_age(hit.age_secs);
+        return Ok(Some(serde_json::to_string(&HookOutput {
+            output: format!(
+                "[same WebFetch content as turn {} ({} ago) — {} tokens saved]",
+                hit.turn, age, hit.tokens_saved
+            ),
+        })?));
+    }
+
+    // Split into sections and score by keyword density (no BERT cost)
+    let sections = split_web_sections(&output_text);
+    if sections.is_empty() {
+        return Ok(None);
+    }
+    let mut scored: Vec<(usize, u32, &str)> = sections
+        .iter()
+        .enumerate()
+        .map(|(idx, text)| (idx, score_web_section(text), text.as_str()))
+        .collect();
+    // Sort by score descending so highest-value sections get BERT first
+    scored.sort_by(|a, b| b.1.cmp(&a.1));
+
+    panda_core::zoom::enable();
+    let mut processed: Vec<(usize, String)> = Vec::with_capacity(sections.len());
+
+    for (orig_idx, _score, section_text) in &scored {
+        // Reserve 2 BERT calls for downstream cross-command dedup + centroid
+        if crate::bert_budget::remaining() > 2 && crate::bert_budget::try_consume() {
+            let summarized = summarize_web_section(section_text);
+            processed.push((*orig_idx, summarized));
+        } else {
+            processed.push((*orig_idx, collapse_section_simple(section_text)));
+        }
+    }
+
+    // Drain and save any zoom blocks registered during summarization
+    let web_blocks = panda_core::zoom::drain();
+    if !web_blocks.is_empty() {
+        let _ = crate::zoom_store::save_blocks(&sid, web_blocks);
+    }
+
+    // Reconstruct in original document order
+    processed.sort_by_key(|(idx, _)| *idx);
+    let final_output = processed
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    // Record URL for dedup on subsequent fetches
+    if crate::bert_budget::try_consume() {
+        if let Ok(mut embs) = panda_core::summarizer::embed_batch(&[final_output.as_str()]) {
+            if let Some(emb) = embs.pop() {
+                let tokens = panda_core::tokens::count_tokens(&final_output);
+                session.record(&url_key, emb, tokens, &final_output, false, None);
+                session.save(&sid);
+            }
+        }
+    }
+
+    let in_tok = panda_core::tokens::count_tokens(&output_text);
+    let out_tok = panda_core::tokens::count_tokens(&final_output);
+    crate::util::append_analytics(&panda_core::analytics::Analytics::new(
+        in_tok,
+        out_tok,
+        Some("(webfetch)".to_string()),
+        None,
+        None,
+    ));
+
+    Ok(Some(serde_json::to_string(&HookOutput { output: final_output })?))
+}
+
+/// Split a web page into logical sections on Markdown headers (`##`/`###`) or
+/// on two or more consecutive blank lines. Returns non-empty sections only.
+fn split_web_sections(text: &str) -> Vec<String> {
+    let mut sections: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut blank_run = 0usize;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            blank_run += 1;
+            if blank_run >= 2 && !current.trim().is_empty() {
+                sections.push(current.trim().to_string());
+                current = String::new();
+            } else {
+                current.push('\n');
+            }
+        } else if (trimmed.starts_with("## ") || trimmed.starts_with("### "))
+            && !current.trim().is_empty()
+        {
+            sections.push(current.trim().to_string());
+            current = format!("{}\n", line);
+            blank_run = 0;
+        } else {
+            blank_run = 0;
+            current.push_str(line);
+            current.push('\n');
+        }
+    }
+    if !current.trim().is_empty() {
+        sections.push(current.trim().to_string());
+    }
+    sections.into_iter().filter(|s| !s.trim().is_empty()).collect()
+}
+
+/// Score a section by keyword density — higher = more information-dense.
+/// Used to prioritise which sections get BERT summarization when budget is limited.
+fn score_web_section(section: &str) -> u32 {
+    const KEYWORDS: &[&str] = &[
+        "error", "warning", "usage", "example", "note", "tip", "return",
+        "parameter", "argument", "important", "required", "optional", "type",
+        "function", "method", "struct", "interface", "class", "const", "fn ",
+        "pub ", "impl ", "```",
+    ];
+    // Navigation/footer patterns that score negatively
+    const NOISE: &[&str] = &[
+        "skip to", "copyright", "terms of", "privacy policy", "cookie",
+        "subscribe", "newsletter", "follow us", "share this",
+    ];
+
+    let lower = section.to_lowercase();
+    let pos: u32 = KEYWORDS.iter().map(|k| lower.matches(k).count() as u32).sum();
+    let neg: u32 = NOISE.iter().map(|k| lower.matches(k).count() as u32).sum();
+    pos.saturating_sub(neg * 3)
+}
+
+/// Collapse a section to its header + first 3 non-empty content lines.
+/// Used when BERT budget is exhausted.
+fn collapse_section_simple(section: &str) -> String {
+    let lines: Vec<&str> = section.lines().collect();
+    let header = lines.first().copied().unwrap_or("").to_string();
+    let body: Vec<&str> = lines
+        .iter()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .take(3)
+        .copied()
+        .collect();
+    if body.is_empty() {
+        return header;
+    }
+    let n_remaining = lines.iter().skip(1).filter(|l| !l.trim().is_empty()).count();
+    let omitted = n_remaining.saturating_sub(body.len());
+    if omitted > 0 {
+        format!(
+            "{}\n{}\n[... {} lines collapsed]",
+            header,
+            body.join("\n"),
+            omitted
+        )
+    } else {
+        format!("{}\n{}", header, body.join("\n"))
+    }
+}
+
+/// BERT-summarize a single web section using the existing line-level summarizer.
+fn summarize_web_section(section: &str) -> String {
+    let line_count = section.lines().count();
+    if line_count <= 5 {
+        return section.to_string();
+    }
+    // Protect code blocks — never compress their content
+    let has_code_block = section.contains("```");
+    if has_code_block {
+        // Only summarize non-code-block portions; return the whole section if
+        // detecting fences would be complex. Safety: preserve content intact.
+        return section.to_string();
+    }
+    let budget = (line_count / 3).max(3).min(20);
+    panda_core::summarizer::summarize(section, budget).output
+}
+
+// ── WebSearch handler ─────────────────────────────────────────────────────────
+
+/// Compress WebSearch results: rank by intent relevance, keep top 8,
+/// collapse lower-ranked results into a zoom block.
+fn process_websearch(hook_input: HookInput) -> Result<Option<String>> {
+    const KEEP_RESULTS: usize = 8;
+    const MIN_RESULTS_TO_PROCESS: usize = 8;
+
+    let output_text = if !hook_input.tool_response.output.is_empty() {
+        hook_input.tool_response.output.clone()
+    } else {
+        hook_input.tool_response.stdout.clone()
+    };
+
+    if output_text.is_empty() {
+        return Ok(None);
+    }
+
+    let results = parse_search_results(&output_text);
+    if results.len() <= MIN_RESULTS_TO_PROCESS {
+        return Ok(None); // few results — pass through unchanged
+    }
+
+    // Score by intent similarity when BERT budget allows; fall back to order
+    let query = crate::intent::extract_intent_multi(3);
+    let ranked = if let Some(ref q) = query {
+        if crate::bert_budget::try_consume() {
+            rank_search_results_by_intent(&results, q)
+        } else {
+            (0..results.len()).collect()
+        }
+    } else {
+        (0..results.len()).collect()
+    };
+
+    // Always keep at least MIN_RESULTS_TO_PROCESS, cap at KEEP_RESULTS
+    let keep_count = KEEP_RESULTS.min(ranked.len());
+    let keep_indices: std::collections::HashSet<usize> =
+        ranked[..keep_count].iter().copied().collect();
+
+    let kept: Vec<&str> = ranked[..keep_count]
+        .iter()
+        .map(|&i| results[i].as_str())
+        .collect();
+    let collapsed: Vec<String> = (0..results.len())
+        .filter(|i| !keep_indices.contains(i))
+        .map(|i| results[i].clone())
+        .collect();
+
+    panda_core::zoom::enable();
+    let mut final_output = kept.join("\n\n");
+
+    if !collapsed.is_empty() {
+        let n = collapsed.len();
+        let zi_id = panda_core::zoom::register(collapsed);
+        final_output.push_str(&format!(
+            "\n\n[{} more results — panda expand {}]",
+            n, zi_id
+        ));
+    }
+
+    let sid = crate::session::session_id();
+    let web_blocks = panda_core::zoom::drain();
+    if !web_blocks.is_empty() {
+        let _ = crate::zoom_store::save_blocks(&sid, web_blocks);
+    }
+
+    let in_tok = panda_core::tokens::count_tokens(&output_text);
+    let out_tok = panda_core::tokens::count_tokens(&final_output);
+    crate::util::append_analytics(&panda_core::analytics::Analytics::new(
+        in_tok,
+        out_tok,
+        Some("(websearch)".to_string()),
+        None,
+        None,
+    ));
+
+    Ok(Some(serde_json::to_string(&HookOutput { output: final_output })?))
+}
+
+/// Parse search results from markdown-list formatted WebSearch output.
+/// Each result is a markdown list item block starting with `- ` or `* `.
+fn parse_search_results(text: &str) -> Vec<String> {
+    let mut results = Vec::new();
+    let mut current = String::new();
+
+    for line in text.lines() {
+        if (line.starts_with("- ") || line.starts_with("* ")) && !current.trim().is_empty() {
+            results.push(current.trim().to_string());
+            current = format!("{}\n", line);
+        } else if line.starts_with("- ") || line.starts_with("* ") {
+            current = format!("{}\n", line);
+        } else if !current.is_empty() {
+            current.push_str(line);
+            current.push('\n');
+        }
+    }
+    if !current.trim().is_empty() {
+        results.push(current.trim().to_string());
+    }
+    results
+}
+
+/// Rank search results by cosine similarity to the intent embedding.
+/// Returns result indices sorted by relevance descending.
+fn rank_search_results_by_intent(results: &[String], intent: &str) -> Vec<usize> {
+    let mut texts: Vec<&str> = results.iter().map(|s| s.as_str()).collect();
+    texts.push(intent);
+
+    let embeddings = match panda_core::summarizer::embed_batch(&texts) {
+        Ok(e) => e,
+        Err(_) => return (0..results.len()).collect(),
+    };
+
+    let intent_emb = &embeddings[embeddings.len() - 1];
+    let result_embs = &embeddings[..results.len()];
+
+    let mut scored: Vec<(usize, f32)> = result_embs
+        .iter()
+        .enumerate()
+        .map(|(i, emb)| {
+            let sim = emb.iter().zip(intent_emb.iter()).map(|(a, b)| a * b).sum::<f32>();
+            (i, sim)
+        })
+        .collect();
+
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.into_iter().map(|(i, _)| i).collect()
 }
 
 #[cfg(test)]
