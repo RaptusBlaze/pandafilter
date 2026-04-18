@@ -245,7 +245,11 @@ fn process_bash(hook_input: HookInput) -> Result<Option<String>> {
         .last_centroid_delta(&cmd_key)
         .map(stability_to_pressure)
         .unwrap_or(0.0);
-    let pressure = (session.context_pressure() + stability_pressure).min(1.0);
+    // Staleness pressure: state-command outputs, pre-edit builds, edited-file reads.
+    // Capped at 0.3 so it cannot dominate the total pressure.
+    let staleness_pressure = session.staleness_pressure();
+    let pressure =
+        (session.context_pressure() + stability_pressure + staleness_pressure).min(1.0);
     panda_core::zoom::enable();
 
     // NL: apply pre-filter to remove lines promoted as permanent noise.

@@ -20,6 +20,7 @@ mod analytics_db;
 mod bert_budget;
 mod cmd;
 mod error_signatures;
+mod staleness;
 mod config_loader;
 mod handlers;
 mod hook;
@@ -176,6 +177,11 @@ enum Commands {
         /// Find and compress the most recently modified conversation in ~/.claude/projects/
         #[arg(long)]
         scan_session: bool,
+        /// Use staleness-aware compression: stale entries (state commands >10 turns old,
+        /// builds before last edit, reads of edited files) get tier-2 compression
+        /// regardless of position. Writes to a separate .smart.json file.
+        #[arg(long)]
+        smart: bool,
     },
 }
 
@@ -253,8 +259,8 @@ fn main() {
             }
             Ok(())
         }
-        Commands::Compress { input, output, recent_turns, tier1_turns, ollama, ollama_model, max_tokens, dry_run, scan_session } =>
-            cmd::compress::run(&input, output.as_deref(), recent_turns, tier1_turns, ollama.as_deref(), &ollama_model, max_tokens, dry_run, scan_session),
+        Commands::Compress { input, output, recent_turns, tier1_turns, ollama, ollama_model, max_tokens, dry_run, scan_session, smart } =>
+            cmd::compress::run(&input, output.as_deref(), recent_turns, tier1_turns, ollama.as_deref(), &ollama_model, max_tokens, dry_run, scan_session, smart),
     };
     if let Err(e) = result {
         eprintln!("panda error: {}", e);

@@ -429,6 +429,31 @@ impl SessionState {
     }
 }
 
+// ── Staleness pressure ────────────────────────────────────────────────────────
+
+impl SessionState {
+    /// Compute additional compression pressure from stale session entries.
+    ///
+    /// Detects state-command outputs (git status, ls, …), build outputs that
+    /// predate the last edit, and file reads of subsequently-edited files.
+    /// The fraction of session tokens that are stale maps to additional pressure,
+    /// capped at 0.3 so staleness never dominates the total pressure calculation.
+    pub fn staleness_pressure(&self) -> f32 {
+        let stale = crate::staleness::detect_stale_entries(self);
+        if stale.is_empty() {
+            return 0.0;
+        }
+        let stale_tokens: usize = stale
+            .iter()
+            .filter_map(|s| self.entries.iter().find(|e| e.turn == s.turn))
+            .map(|e| e.tokens)
+            .sum();
+        let ratio = stale_tokens as f32 / self.total_tokens.max(1) as f32;
+        // Scale: 50% of ratio → pressure, max 0.3
+        (ratio * 0.5).min(0.3)
+    }
+}
+
 // ── Session-aware compression budget (C2) ────────────────────────────────────
 
 impl SessionState {

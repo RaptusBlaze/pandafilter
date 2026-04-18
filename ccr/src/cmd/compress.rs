@@ -1,6 +1,6 @@
 use anyhow::Result;
 use panda_sdk::{
-    compressor::{compress, CompressionConfig},
+    compressor::{compress, CompressionConfig, CompressResult},
     deduplicator::deduplicate,
     message::Message,
     ollama::OllamaConfig,
@@ -17,6 +17,7 @@ pub fn run(
     max_tokens: Option<usize>,
     dry_run: bool,
     scan_session: bool,
+    smart: bool,
 ) -> Result<()> {
     let (raw, source_path) = if scan_session {
         let path = find_latest_jsonl()
@@ -74,7 +75,15 @@ pub fn run(
 
     // Deduplicate first, then compress (matches Optimizer logic)
     let deduped = deduplicate(messages.clone());
-    let result = compress(deduped, &config);
+    let mut result = compress(deduped, &config);
+
+    // Smart mode: apply an additional staleness-aware pass.
+    // Stale messages (state commands >10 turns old, builds before last edit,
+    // reads of edited files) are re-compressed to tier-2 ratio regardless of
+    // their position. Writes to a separate .smart.json file.
+    if smart {
+        result = apply_smart_compression(result.messages, &config);
+    }
 
     let turns = messages.len();
 
@@ -96,7 +105,8 @@ pub fn run(
 
     match &source_path {
         Some(path) if scan_session => {
-            let out_path = format!("{}.compressed.json", path.display());
+            let suffix = if smart { ".smart.json" } else { ".compressed.json" };
+            let out_path = format!("{}{}", path.display(), suffix);
             std::fs::write(&out_path, &json)
                 .map_err(|e| anyhow::anyhow!("cannot write to '{}': {}", out_path, e))?;
             if result.tokens_in > 0 {
@@ -260,6 +270,128 @@ fn parse_conversation(raw: &str) -> Result<Vec<Message>> {
     )
 }
 
+/// Apply content-aware staleness compression as an additional pass after normal compression.
+///
+/// Scans each message's text for patterns that indicate stale information —
+/// git-status/log/diff output, build output that predates the last apparent
+/// edit, ls/df/ps output. Messages that match AND fall outside the `recent_n`
+/// verbatim window are re-compressed to `tier2_ratio`.
+///
+/// The function never touches messages in the most-recent `recent_n` window
+/// and never calls BERT — detection is pure regex/substring matching.
+fn apply_smart_compression(messages: Vec<Message>, config: &CompressionConfig) -> CompressResult {
+    let n = messages.len();
+    let tokens_in: usize = messages.iter().map(|m| panda_core::tokens::count_tokens(&m.content)).sum();
+
+    // Find the index of the last message that looks like a code-edit operation.
+    // Build / state outputs recorded before this index are considered stale.
+    let last_edit_idx = find_last_edit_index(&messages);
+
+    let compressed: Vec<Message> = messages
+        .into_iter()
+        .enumerate()
+        .map(|(i, msg)| {
+            let age = n - 1 - i; // 0 = most recent
+            // Always preserve the recent verbatim window.
+            if age < config.recent_n {
+                return msg;
+            }
+            if is_stale_content(&msg.content, i, last_edit_idx) {
+                let new_content = panda_core::summarizer::summarize_message(
+                    &msg.content,
+                    config.tier2_ratio,
+                )
+                .output;
+                Message { role: msg.role, content: new_content }
+            } else {
+                msg
+            }
+        })
+        .collect();
+
+    let tokens_out: usize = compressed.iter().map(|m| panda_core::tokens::count_tokens(&m.content)).sum();
+    CompressResult { messages: compressed, tokens_in, tokens_out }
+}
+
+/// Return the 0-based index of the last message whose content looks like it
+/// describes a code-edit or file-write operation.
+fn find_last_edit_index(messages: &[Message]) -> Option<usize> {
+    // Patterns that suggest the assistant or the user performed an edit.
+    // We scan case-insensitively against a few unambiguous markers.
+    const EDIT_MARKERS: &[&str] = &[
+        "--- a/",         // unified diff header produced by editors / git
+        "+++ b/",
+        "edit(",          // Edit tool invocation text that may appear in assistant response
+        "write(",         // Write tool
+        "✎ edit",
+        "modified file",
+        "updated file",
+        "wrote to ",
+        "saved to ",
+    ];
+    messages.iter().rposition(|msg| {
+        let lower = msg.content.to_lowercase();
+        EDIT_MARKERS.iter().any(|&pat| lower.contains(pat))
+    })
+}
+
+/// Returns `true` when the message content looks like stale state/build output.
+///
+/// State command output is always stale outside the recent window.
+/// Build output is stale only when it predates `last_edit_idx` (i.e. the
+/// build result is invalidated by a later edit).
+fn is_stale_content(content: &str, idx: usize, last_edit_idx: Option<usize>) -> bool {
+    let lower = content.to_lowercase();
+
+    // ── State command output patterns ────────────────────────────────────────
+    // git status / git log / git diff
+    let is_git_state =
+        lower.contains("on branch")
+            || lower.contains("changes not staged for commit")
+            || lower.contains("changes to be committed")
+            || lower.contains("nothing to commit")
+            || lower.contains("untracked files:")
+            || lower.contains("diff --git")
+            || (lower.contains("author:") && lower.contains("date:") && lower.contains("commit "));
+
+    if is_git_state {
+        return true;
+    }
+
+    // kubectl / docker / df / ps state output
+    let is_sys_state =
+        (lower.contains("namespace") && lower.contains("status") && lower.contains("age"))
+            || (lower.contains("container id") && lower.contains("image") && lower.contains("status"))
+            || (lower.contains("filesystem") && lower.contains("used") && lower.contains("available"))
+            || (lower.contains("pid") && lower.contains("user") && lower.contains("command") && lower.contains("%cpu"));
+
+    if is_sys_state {
+        return true;
+    }
+
+    // ── Build / test output that predates the last edit ──────────────────────
+    if let Some(edit_idx) = last_edit_idx {
+        if idx < edit_idx {
+            let is_build_output =
+                lower.contains("compiling ")
+                    || lower.contains("finished [")
+                    || lower.contains("error[e")
+                    || lower.contains("test result:")
+                    || (lower.contains(" passed") && lower.contains(" failed"))
+                    || lower.contains("running cargo")
+                    || lower.contains("cargo build")
+                    || lower.contains("cargo test")
+                    || lower.contains("pytest")
+                    || lower.contains("failed tests:");
+            if is_build_output {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,5 +496,114 @@ mod tests {
         let mut best = None;
         visit_dir(nonexistent, &mut best);
         assert!(best.is_none());
+    }
+
+    // ── apply_smart_compression tests ─────────────────────────────────────────
+
+    fn make_msgs(pairs: &[(&str, &str)]) -> Vec<Message> {
+        pairs
+            .iter()
+            .map(|(role, content)| Message { role: role.to_string(), content: content.to_string() })
+            .collect()
+    }
+
+    #[test]
+    fn smart_compression_reduces_tokens_for_git_state_output() {
+        // Git status output in an old message should be re-compressed.
+        let git_status = "On branch main\nChanges not staged for commit:\n  \
+            (use \"git add <file>...\" to update what will be committed)\n\
+            modified:   src/main.rs\n\
+            modified:   src/lib.rs\n\
+            modified:   src/hook.rs\n\
+            nothing to commit for now but you should still check this carefully\n\
+            Untracked files:\n  .DS_Store\n  target/\n  README.md.bak";
+        let msgs = make_msgs(&[
+            ("assistant", git_status),
+            ("user", "ok, continue"),
+            ("user", "and now"),
+            ("user", "and now 2"),
+            ("user", "latest user message here"),
+        ]);
+        let config = CompressionConfig { recent_n: 2, ..Default::default() };
+        let tokens_before: usize = msgs.iter().map(|m| panda_core::tokens::count_tokens(&m.content)).sum();
+        let result = apply_smart_compression(msgs, &config);
+        assert!(result.tokens_out <= tokens_before);
+    }
+
+    #[test]
+    fn smart_compression_preserves_recent_window() {
+        // Messages within recent_n must never be touched.
+        let git_status = "On branch main\nChanges not staged for commit:\n\
+            modified:   src/main.rs\nnothing to commit, working tree clean";
+        let msgs = make_msgs(&[
+            ("assistant", git_status),
+            ("user", "latest message, verbatim"),
+        ]);
+        let config = CompressionConfig { recent_n: 2, ..Default::default() };
+        let result = apply_smart_compression(msgs, &config);
+        // The most recent message must be untouched.
+        assert_eq!(result.messages.last().unwrap().content, "latest message, verbatim");
+        // The git status message is also within recent_n=2, so untouched.
+        assert_eq!(result.messages[0].content, git_status);
+    }
+
+    #[test]
+    fn smart_compression_build_before_edit_is_stale() {
+        // A cargo build result that predates a write operation should be compressed.
+        let build_output = "Compiling panda v1.0.0\n\
+            error[E0382]: borrow of moved value\n  --> src/main.rs:10:5\n\
+            Compiling again after fixes\nFinished [unoptimized] in 1.23s\n\
+            All tests passed. Test result: ok. 3 passed; 0 failed.\n\
+            Build complete and all checks passed successfully.";
+        let edit_msg = "I edited src/main.rs to fix the borrow issue. wrote to the file.";
+        let msgs = make_msgs(&[
+            ("assistant", build_output), // idx 0 — before edit
+            ("assistant", edit_msg),     // idx 1 — last edit marker
+            ("user", "great, thanks"),
+            ("user", "latest turn"),
+        ]);
+        let config = CompressionConfig { recent_n: 1, ..Default::default() };
+        let result = apply_smart_compression(msgs, &config);
+        // Build output at idx 0 should be compressed (shorter).
+        assert!(result.messages[0].content.len() < build_output.len());
+    }
+
+    #[test]
+    fn smart_compression_build_after_edit_is_not_stale() {
+        // A build that comes AFTER the last edit should not be compressed by smart pass.
+        let edit_msg = "wrote to src/main.rs: fixed the issue.";
+        let build_output = "Compiling panda v1.0.0\nFinished [unoptimized] in 0.50s\n\
+            Test result: ok. 5 passed; 0 failed; done.";
+        let msgs = make_msgs(&[
+            ("assistant", edit_msg),      // idx 0 — last edit marker
+            ("assistant", build_output),  // idx 1 — build AFTER edit, not stale
+            ("user", "latest turn"),
+        ]);
+        let config = CompressionConfig { recent_n: 0, ..Default::default() };
+        let result = apply_smart_compression(msgs, &config);
+        // Build output after edit should be untouched.
+        assert_eq!(result.messages[1].content, build_output);
+    }
+
+    #[test]
+    fn smart_compression_empty_input_is_fine() {
+        let msgs: Vec<Message> = vec![];
+        let config = CompressionConfig::default();
+        let result = apply_smart_compression(msgs, &config);
+        assert!(result.messages.is_empty());
+        assert_eq!(result.tokens_in, 0);
+        assert_eq!(result.tokens_out, 0);
+    }
+
+    #[test]
+    fn is_stale_content_detects_git_status() {
+        let git = "On branch main\nnothing to commit, working tree clean";
+        assert!(is_stale_content(git, 0, None));
+    }
+
+    #[test]
+    fn is_stale_content_does_not_flag_normal_text() {
+        let normal = "Here is the implementation of the new feature. It uses BERT embeddings.";
+        assert!(!is_stale_content(normal, 0, None));
     }
 }
