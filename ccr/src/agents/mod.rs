@@ -7,6 +7,7 @@ pub mod codex;
 pub mod copilot;
 pub mod gemini;
 pub mod openclaw;
+pub mod opencode;
 pub mod windsurf;
 
 /// Common interface for all agent hook installers.
@@ -28,6 +29,7 @@ pub fn get_installer(agent: &str) -> Option<Box<dyn AgentInstaller>> {
         "codex"               => Some(Box::new(codex::CodexInstaller)),
         "windsurf"            => Some(Box::new(windsurf::WindsurfInstaller)),
         "openclaw"            => Some(Box::new(openclaw::OpenClawInstaller)),
+        "opencode"            => Some(Box::new(opencode::OpencodeInstaller)),
         _                     => None,
     }
 }

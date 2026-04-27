@@ -41,12 +41,12 @@ pub fn process(input: &str) -> Result<Option<String>> {
     };
 
     match hook_input.tool_name.as_str() {
-        "Read" => process_read(hook_input),
-        "Edit" => process_edit(hook_input),
-        "Glob" => process_glob(hook_input),
-        "Grep" => process_grep(hook_input),
-        "WebFetch" => process_webfetch(hook_input),
-        "WebSearch" => process_websearch(hook_input),
+        "Read" | "read" => process_read(hook_input),
+        "Edit" | "edit" => process_edit(hook_input),
+        "Glob" | "glob" => process_glob(hook_input),
+        "Grep" | "grep" => process_grep(hook_input),
+        "WebFetch" | "webfetch" => process_webfetch(hook_input),
+        "WebSearch" | "websearch" => process_websearch(hook_input),
         _ => process_bash(hook_input), // Bash and unknown tools
     }
 }
@@ -78,6 +78,10 @@ pub fn run() -> Result<()> {
             "windsurf" => (
                 home.join(".codeium").join("windsurf").join("panda-rewrite.sh"),
                 home.join(".codeium").join("windsurf"),
+            ),
+            "opencode" => (
+                home.join(".config").join("opencode").join("plugins").join("panda-filter.js"),
+                home.join(".config").join("opencode").join("plugins"),
             ),
             _ => (
                 home.join(".claude").join("hooks").join("panda-rewrite.sh"),
