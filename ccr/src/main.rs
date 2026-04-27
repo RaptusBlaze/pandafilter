@@ -17,6 +17,8 @@ enum AgentTarget {
     Windsurf,
     /// OpenClaw
     Openclaw,
+    /// OpenCode (open-source AI coding agent)
+    Opencode,
     /// Install for all detected agents
     All,
 }
@@ -231,6 +233,7 @@ fn main() {
             (false, AgentTarget::Codex)     => init_agent("codex"),
             (false, AgentTarget::Windsurf)  => init_agent("windsurf"),
             (false, AgentTarget::Openclaw)  => init_agent("openclaw"),
+            (false, AgentTarget::Opencode)  => init_agent("opencode"),
             (false, AgentTarget::All)       => init_all_agents(skip_model),
             (true,  AgentTarget::Copilot)   => uninstall_agent("copilot"),
             (true,  AgentTarget::Gemini)    => uninstall_agent("gemini"),
@@ -238,6 +241,7 @@ fn main() {
             (true,  AgentTarget::Codex)     => uninstall_agent("codex"),
             (true,  AgentTarget::Windsurf)  => uninstall_agent("windsurf"),
             (true,  AgentTarget::Openclaw)  => uninstall_agent("openclaw"),
+            (true,  AgentTarget::Opencode)  => uninstall_agent("opencode"),
             (true,  AgentTarget::All)       => uninstall_all_agents(),
         },
         Commands::Run { args } => cmd::run::run(args),
@@ -765,7 +769,7 @@ fn init_agent(agent: &str) -> anyhow::Result<()> {
         Some(installer) => installer.install(&panda_bin_str),
         None => {
             anyhow::bail!(
-                "Unknown agent '{}'. Valid agents: copilot, gemini, cline, codex, windsurf, openclaw",
+                "Unknown agent '{}'. Valid agents: copilot, gemini, cline, codex, windsurf, openclaw, opencode",
                 agent
             )
         }
@@ -777,7 +781,7 @@ fn uninstall_agent(agent: &str) -> anyhow::Result<()> {
         Some(installer) => installer.uninstall(),
         None => {
             anyhow::bail!(
-                "Unknown agent '{}'. Valid agents: copilot, gemini, cline, codex, windsurf, openclaw",
+                "Unknown agent '{}'. Valid agents: copilot, gemini, cline, codex, windsurf, openclaw, opencode",
                 agent
             )
         }
@@ -788,7 +792,7 @@ fn init_all_agents(skip_model: bool) -> anyhow::Result<()> {
     // Always install the Claude (default) agent first
     init(skip_model)?;
     // Then attempt each new agent, printing warnings on failure
-    for agent in &["copilot", "gemini", "cline", "codex", "windsurf", "openclaw"] {
+    for agent in &["copilot", "gemini", "cline", "codex", "windsurf", "openclaw", "opencode"] {
         if let Err(e) = init_agent(agent) {
             eprintln!("warning: could not install {} agent: {}", agent, e);
         }
@@ -799,7 +803,7 @@ fn init_all_agents(skip_model: bool) -> anyhow::Result<()> {
 fn uninstall_all_agents() -> anyhow::Result<()> {
     let _ = uninstall_panda();
     let _ = uninstall_cursor();
-    for agent in &["copilot", "gemini", "cline", "codex", "windsurf", "openclaw"] {
+    for agent in &["copilot", "gemini", "cline", "codex", "windsurf", "openclaw", "opencode"] {
         if let Err(e) = uninstall_agent(agent) {
             eprintln!("warning: could not uninstall {} agent: {}", agent, e);
         }
