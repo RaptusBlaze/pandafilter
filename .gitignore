@@ -2,3 +2,6 @@
 target/
 **/.fastembed_cache/
 *.log
+ccr-eval/benchmarks/reports/
+ccr-eval/benchmarks/indexes/
+ccr-eval/benchmarks/repos/
