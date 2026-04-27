@@ -194,7 +194,7 @@ fn test_opencode_uninstall_removes_plugin() {
 // ── 11. Default `panda init` does not touch ~/.config/opencode ────────────────
 
 #[test]
-fn test_claude_init_does_not_touch_opencode() {
+fn test_default_init_does_not_touch_opencode() {
     let home = TempDir::new().unwrap();
 
     ccr()

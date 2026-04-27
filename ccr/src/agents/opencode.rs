@@ -143,6 +143,7 @@ export default {
   id: "panda-filter",
   server: async (_input) => ({
     // PreToolUse equivalent: rewrite bash commands before execution
+    // spawnSync is synchronous but fast (panda rewrite is pure text, no I/O).
     "tool.execute.before": async ({ tool, sessionID }, output) => {
       if (tool !== "bash") return
       const cmd = output.args?.command
@@ -160,7 +161,9 @@ export default {
       } catch (_) {} // fail silently — never block the agent
     },
 
-    // PostToolUse equivalent: compress tool output before the LLM sees it
+    // PostToolUse equivalent: compress tool output before the LLM sees it.
+    // spawnSync blocks briefly while panda hook processes the text (typically
+    // <100 ms; 10 s timeout guards against pathological inputs).
     "tool.execute.after": async ({ tool, sessionID, args }, output) => {
       if (!COMPRESSIBLE.has(tool)) return
       try {
